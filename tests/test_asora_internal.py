@@ -9,17 +9,18 @@ except ImportError:
     pytest.skip("libasoratest.so missing, skipping tests", allow_module_level=True)
 
 
-@pytest.mark.parametrize("pos0", [(5, 5, 5), (1, 2, 3), (10, 5, 15)])
-def test_cinterp(data_dir: Path, pos0: tuple[int, int, int]) -> None:
+def test_cinterp(data_dir: Path) -> None:
     rng = np.random.default_rng(seed=42)
-    N = 20
+    N = 11
     dens = rng.random((N, N, N), dtype=np.float64)
 
-    output = asoratest.cinterp(pos0, dens)
-    suff = "".join(f"{s:02}" for s in pos0)
-    expected_output = np.load(data_dir / f"cinterp_output_{suff}.npy")
+    cdens, path = asoratest.cinterp(dens)
+    expected_output = np.load(data_dir / "cinterp_output.npz")
 
-    assert np.allclose(output, expected_output, equal_nan=True)
+    assert np.allclose(cdens, expected_output["cdens"])
+    assert np.allclose(path, expected_output["path"])
+
+    expected_output.close()
 
 
 def linthrd2cart(q: int, s: int) -> tuple[int, int, int]:
@@ -49,10 +50,24 @@ def linthrd2cart(q: int, s: int) -> tuple[int, int, int]:
     return i, j, sgn * (q - abs(i) - abs(j))
 
 
-@pytest.mark.parametrize("q", range(0, 42))
+@pytest.mark.parametrize("q", range(0, 50))
 def test_shell_mapping(q: int) -> None:
     q_max = 4 * q**2 + 2 if q > 0 else 1
     for s in range(q_max):
         ijk = linthrd2cart(q, s)
         assert ijk == asoratest.linthrd2cart(q, s)
         assert (q, s) == asoratest.cart2linthrd(*ijk)
+
+
+def test_cells_in_shell() -> None:
+    assert asoratest.cells_in_shell(0) == 1
+    for q in range(1, 50):
+        assert asoratest.cells_in_shell(q) == 4 * q**2 + 2
+
+
+def test_cells_to_shell() -> None:
+    q_tot = 1
+    assert asoratest.cells_to_shell(0) == q_tot
+    for q in range(1, 50):
+        q_tot += 4 * q**2 + 2
+        assert asoratest.cells_to_shell(q) == q_tot
