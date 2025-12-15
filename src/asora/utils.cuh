@@ -33,4 +33,10 @@ namespace asora {
     __host__ __device__ cuda::std::array<int, 3> linthrd2cart(int q, int s);
     __host__ __device__ cuda::std::array<int, 2> cart2linthrd(int i, int j, int k);
 
+    // Return the number of cells in the shell.
+    __host__ __device__ size_t cells_in_shell(int q);
+
+    // Return the cumulative number of cells up to the shell.
+    __host__ __device__ size_t cells_to_shell(int q);
+
 }  // namespace asora
