@@ -56,6 +56,7 @@ namespace {
     // cover the full q-shell.
     __device__ void raytrace(
         int q, int s, int i0, int j0, int k0, double strength,
+        const cuda::std::array<double *, 3> &shared_cdens,
         double *__restrict__ coldensh_out, const double *__restrict__ ndens,
         const double *__restrict__ xh_av, double *__restrict__ phi_ion, size_t m1,
         double sigma, double dr, double R_max, const asora::photo_tables &ion_tables,
@@ -76,7 +77,7 @@ namespace {
         if (!in_box(i0 + di, j0 + dj, k0 + dk, m1)) return;
 #endif
         // Calculate column density to and path inside this cell.
-        auto [coldensh_in, path] = cinterp_gpu(di, dj, dk, coldensh_out, sigma);
+        auto [coldensh_in, path] = cinterp_gpu(di, dj, dk, shared_cdens, sigma);
         path *= dr;
 
         auto dist2 =
@@ -238,13 +239,46 @@ namespace asora {
         // usually more cells, threads can do additional work. (q, s) indexing is mapped
         // to the (i, j, k) indexing of the cells via the mapping described in the
         // paper.
+
+        // Memory shared between threads with column density values from q-1, q-2 and
+        // q-3 shells.
+        constexpr size_t shared_size = 2048;
+        __shared__ double cdens1[shared_size];
+        __shared__ double cdens2[shared_size];
+        __shared__ double cdens3[shared_size];
+
         for (int q = 1; q <= q_max; ++q) {
             int num_cells = cells_in_shell(q);
+
+            cuda::std::array<double *, 3> shared_cdens;
+            auto q_off_1 = cells_to_shell(q - 2);
+            auto q_off_2 = cells_to_shell(q - 3);
+            auto q_off_3 = cells_to_shell(q - 4);
+            if (num_cells < shared_size) {
+                // Threads copy the column density values of previous q-shell on the
+                // shared memory.
+                int s = threadIdx.x;
+                while (s < num_cells) {
+                    cdens1[s] = coldensh_out[q_off_1 + s];
+                    cdens2[s] = coldensh_out[q_off_2 + s];
+                    cdens3[s] = coldensh_out[q_off_3 + s];
+                    s += blockDim.x;
+                }
+                __syncthreads();
+                shared_cdens = {cdens1, cdens2, cdens3};
+            } else {
+                // There is not enough space on shared memory, so global memory is used.
+                shared_cdens = {
+                    &coldensh_out[q_off_1], &coldensh_out[q_off_2],
+                    &coldensh_out[q_off_3]
+                };
+            }
+
             int s = threadIdx.x;
             while (s < num_cells) {
                 raytrace(
-                    q, s, i0, j0, k0, strength, coldensh_out, ndens, xh_av, phi_ion, m1,
-                    sigma, dr, R_max, ion_tables, logtau, ll, lr
+                    q, s, i0, j0, k0, strength, shared_cdens, coldensh_out, ndens,
+                    xh_av, phi_ion, m1, sigma, dr, R_max, ion_tables, logtau, ll, lr
                 );
                 s += blockDim.x;
             }
@@ -270,7 +304,7 @@ namespace asora {
     }
 
     __device__ cuda::std::pair<double, double> cinterp_gpu(
-        int di, int dj, int dk, const double *__restrict__ coldensh_out,
+        int di, int dj, int dk, const cuda::std::array<double *, 3> &shared_cdens,
         double sigma_HI_at_ion_freq
     ) {
         if (di == 0 && dj == 0 && dk == 0) return {0.0, 0.5};
@@ -282,10 +316,13 @@ namespace asora {
         int aj = std::abs(dj);
         int ak = std::abs(dk);
 
-        auto get_column_density = [&coldensh_out, di, dj,
-                                   dk](int i_off, int j_off, int k_off) {
+        auto get_column_density = [&shared_cdens, di, dj, dk,
+                                   q0 = abs(di) + abs(dj) +
+                                        abs(dk)](int i_off, int j_off, int k_off) {
             auto &&[q, s] = cart2linthrd(di - i_off, dj - j_off, dk - k_off);
-            return coldensh_out[cells_to_shell(q - 1) + s];
+            auto qlev = q0 - q - 1;
+            if (qlev < 0 || qlev >= shared_cdens.size()) return 0.0;
+            return shared_cdens[qlev][s];
         };
 
         double c1 = get_column_density(si, sj, sk);
