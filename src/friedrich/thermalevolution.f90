@@ -1,24 +1,16 @@
-! This module contains routines having to do with the calculation of
-! the thermal evolution of a single point/cell. 
+! This module contains routines having to do with the calculation of the thermal evolution of a single point/cell. 
 
 module thermalevolution
-
 
   !use precision, only: real64
   use, intrinsic :: iso_fortran_env, only: real64
   
   !> Thermal: minimum temperature [K]
-  real(kind=real64),parameter :: minitemp=1.0 
+  real(kind=real64),parameter :: minitemp=1.0
   !> Thermal: fraction of the cooling time step below which no iteration is done
   real(kind=real64),parameter :: relative_denergy=0.1
-
-  !> Boltzmann constant
-  real(kind=real64), parameter :: k_B=1.381e-16_dp
-  
   !> adiabatic index
-  real(kind=dp),public,parameter :: gamma = 5.0_dp/3.0_dp
-  !> adiabatic index - 1
-  real(kind=dp),public,parameter :: gamma1 = gamma - 1.0_dp
+  real(kind=real64),public,parameter :: gamma = 5.0/3.0
 
   !use cosmology
   !use radiation, only: photrates
@@ -28,7 +20,7 @@ module thermalevolution
   implicit none
 
 contains
-
+    ! TODO: this function below that loop over the voxels is not necessary. As the thermal subroutine will be directly callded inside the doric subroutine. Kept it for testing
     ! thermal evolution of the box
     subroutine thermal_evolve(dt,ndens,temp,xh,phi_ion,abu_c,m1,m2,m3)
         ! Subroutine Arguments
@@ -66,52 +58,11 @@ contains
     end subroutine thermal_evolve
 
 
-  !> find electron density
-  function electrondens(ndens,xh,xhe)
-     
-    real(kind=real64) :: electrondens 
-    real(kind=real64),intent(in) :: ndens !< number density
-    real(kind=real64),intent(in) :: xh(0:1) !< H ionization fractions
-    real(kind=real64),intent(in) :: xhe(0:2) !< He ionization fractions
-
-    electrondens=ndens*(xh(1)*(1.0-abu_he)+abu_c+abu_he*(xhe(1)+2.0*xhe(2)))
-    !electrondens=ndens*(xh(1)*(1.0-abu_he)+abu_he*(xhe(1)+2.0*xhe(2)))
-  end function electrondens
-
-  !> find pressure from temperature
-  elemental function pressr2temper (pressr,ndens,eldens) result(temper)
-
-    real(kind=real64),intent(in) :: pressr !< pressure
-    real(kind=real64),intent(in) :: ndens !< number density
-    real(kind=real64),intent(in) :: eldens !< electron density
-    
-    real(kind=real64) :: temper !< temperature
-
-    temper=pressr/(k_B*(ndens+eldens))
-    
-    !pressr2temper=temper
-    
-  end function pressr2temper
-      
-  !> find temperature from pressure
-  elemental function temper2pressr (temper,ndens,eldens) result(pressr)
-    
-    real(kind=real64),intent(in) :: ndens !< number density
-    real(kind=real64),intent(in) :: temper !< temperature
-    real(kind=real64),intent(in) :: eldens !< electron density
-    
-    real(kind=real64) :: pressr !< pressure
-
-    pressr=(ndens+eldens)*k_B*temper
-
-    !temper2pressr=pressr
-
-  end function temper2pressr
-  
+  ! TODO: this function read some tables
   !> Calculate the cooling rate
   function coolin(nucldens,eldens,xh,temp0)
     
-    real(kind=real64) :: coolin
+    real(kind=real64),intent(out) :: coolin
     
     real(kind=real64),intent(in) :: nucldens !< number density
     real(kind=real64),intent(in) :: eldens !< electron density
@@ -132,8 +83,27 @@ contains
     
   end function coolin
   
+  ! TODO: this function below could be a variable in python passed to the thermal_evolve subroutine. Using astropy for the dz/dt will also assure consistency with the cosmology in the C2Ray class.
+  !> Calculates the cosmological adiabatic cooling
+  function cosmo_cool (e_int,H0,Omega0,zred)
+    real(kind=real64),intent(out) :: cosmo_cool
+
+    real(kind=real64),intent(in) :: e_int
+    real(kind=real64),intent(in) :: H0
+    real(kind=real64),intent(in) :: Omega0
+    real(kind=real64),intent(in) :: zred
+    real(kind=real64) :: dzdt
+
+    ! dz/dt (for flat LambdaCDM)
+    dzdt=H0*(1.+zred)*sqrt(Omega0*(1.+zred)**3+1.-Omega0)
+
+    !Cooling rate
+    cosmo_cool=e_int*2.0/(1.0+zred)*dzdt
+
+  end function cosmo_cool
+
   ! calculates the thermal evolution of one grid point
-  subroutine thermal (dt,end_temper,avg_temper,ndens_electron,ndens_atom,ion,phi)!,pos)
+  subroutine thermal (dt,end_temper,avg_temper,ndens_electron_av,ndens_atom,ion,phi,heat)!,pos)
 
     ! The time step
     real(kind=real64), intent(in) :: dt
@@ -142,13 +112,27 @@ contains
     ! average temperature of the cell
     real(kind=real64), intent(out) :: avg_temper
     ! Electron density of the cell
-    real(kind=real64), intent(in) :: ndens_electron
+    real(kind=real64), intent(in) :: ndens_electron_av
+    ! electron density TODO: not sure why we have to calculate these two quantities     
+    real(kind=real64) :: ndens_electron_old
     ! Number density of atoms of the cell
     real(kind=real64), intent(in) :: ndens_atom
-    ! Photoionization rate and heating rate
+    ! Photoionization rate
     real(kind=real64), intent(in) :: phi
-    ! Ionized fraction of the cell
-    real(kind=real64), intent(in) :: ion
+    ! Heating rate
+    real(kind=real64), intent(in) :: heat
+    ! Hydrogen ionized fraction (HI) of the cell
+    real(kind=real64), intent(in) :: ion_hi_old
+    real(kind=real64), intent(in) :: ion_hi_av
+    real(kind=real64), intent(in) :: ion_hi
+    ! Helium first ionized fraction (HeII) of the cell
+    real(kind=real64), intent(in) :: ion_heii_old
+    real(kind=real64), intent(in) :: ion_heii_av
+    real(kind=real64), intent(in) :: ion_heii
+    ! Helium second ionized fraction (HeIII) of the cell
+    real(kind=real64), intent(in) :: ion_heiii_old
+    real(kind=real64), intent(in) :: ion_heiii_av
+    real(kind=real64), intent(in) :: ion_heiii
     ! mesh position of cell 
     !integer, intent(in) :: pos
  
@@ -174,16 +158,16 @@ contains
     real(kind=real64) :: cosmo_cool_rate
     ! Counter of number of thermal timesteps taken
     integer :: i_heating
+    
+    ndens_electron_old = electrondens(ndens_atom,ion_hi_old,ion_heii_old,ion_heiii_old)
 
     ! heating rate
-    heating = phi%heat
+    heating = heat
 
     ! Find initial internal energy
-    internal_energy = temper2pressr(end_temper,ndens_atom, &
-         electrondens(ndens_atom,ion%h_old,ion%he_old))/(gamma1)
-    !internal_energy = temper2pressr(end_temper,ndens_atom,electrondens(ndens_atom,ion%begin_HII, &
-    !                                ion%begin_HeII,ion%begin_HeIII))/(gamma1)
+    internal_energy = temper2pressr(end_temper,ndens_atom, ndens_electron_old)/(gamma-1.0)
 
+    ! TODO: the variable cosmo_cool_rate can 
     ! Set the cosmological cooling rate
     if (cosmological) then
        ! Disabled for testing
@@ -192,8 +176,7 @@ contains
        cosmo_cool_rate=0.0
     endif
 
-    ! Thermal process is only done if the temperature of the cell 
-    ! is larger than the minimum temperature requirement
+    ! Thermal process is only done if the temperature of the cell is larger than the minimum temperature requirement
     if (end_temper > minitemp) then
 
        ! stores the time elapsed is done
@@ -210,15 +193,12 @@ contains
 
        ! thermal process begins
        do
-
           ! update counter              
           i_heating = i_heating+1 
          
           ! update cooling rate from cooling tables
-          cooling = coolin(ndens_atom,ndens_electron,ion%h_av,ion%he_av, &
+          cooling = coolin(ndens_atom,ndens_electron,ion_h_av,ion_he_av, &
                end_temper)+cosmo_cool_rate
-          !cooling = coolin(ndens_atom,ndens_electron,ion%avg_HI,ion%avg_HII,ion%avg_HeI,ion%avg_HeII,&
-          !                 ion%avg_HeIII, end_temper)+cosmo_cool_rate
 
           ! Find total energy change rate
           thermal_rate = max(1d-50,abs(cooling-heating))
@@ -226,13 +206,10 @@ contains
           ! Calculate thermal time scale
           thermal_timescale = internal_energy/abs(thermal_rate)
 
-          ! Calculate time step needed to limit energy change
-          ! to a fraction relative_denergy
+          ! Calculate time step needed to limit energy change to a fraction relative_denergy
           dt_thermal = relative_denergy*thermal_timescale
 
-          ! Time step to large, change it to dt_thermal
-          ! Make sure we do not integrate for longer than the
-          ! total time step
+          ! Time step to large, change it to dt_thermal. Make sure we do not integrate for longer than the total time step
           dt_ODE = min(dt_thermal,dt-cumulative_time)
 
           ! Find new internal energy density
@@ -242,22 +219,18 @@ contains
           avg_temper = avg_temper+0.5*end_temper*dt_ODE
 
           ! Find new temperature from the internal energy density
-          end_temper = pressr2temper(internal_energy*gamma1,ndens_atom, &
-               electrondens(ndens_atom,ion%h_av,ion%he_av))
-          !end_temper = pressr2temper(internal_energy*gamma1,ndens_atom,electrondens(ndens_atom,&
-          !                           ion%avg_HII,ion%avg_HeII,ion%avg_HeIII))
-
-          ! Update avg_temper sum (second part of dt_thermal sub time step)
-          avg_temper = avg_temper+0.5*end_temper*dt_ODE
+          end_temper = pressr2temper(internal_energy*(gamma-1.0),ndens_atom, &
+               electrondens(ndens_atom,ion_h_av,ion_he_av))
                     
           ! Take measures if temperature drops below minitemp
           if (end_temper < minitemp) then
              internal_energy = temper2pressr(minitemp,ndens_atom, &
-                  electrondens(ndens_atom,ion%h_av,ion%he_av))
-             !internal_energy = temper2pressr(minitemp,ndens_atom,electrondens(ndens_atom,ion%avg_HII,&
-             !                                ion%avg_HeII,ion%avg_HeIII))
+                  electrondens(ndens_atom,ion_h_av,ion_he_av))
              end_temper = minitemp
           endif
+
+          ! Update avg_temper sum (second part of dt_thermal sub time step)
+          avg_temper = avg_temper+0.5*end_temper*dt_ODE
                     
           ! Update fractional cumulative_time
           cumulative_time = cumulative_time+dt_ODE
@@ -267,7 +240,7 @@ contains
 
           ! In case we spend too much time here, we exit
           if (i_heating > 10000) exit
-        	     	
+       
        enddo
               
        ! Calculate the averaged temperature
@@ -278,10 +251,8 @@ contains
        endif
        
        ! Calculate the final temperature 
-       end_temper = pressr2temper(internal_energy*gamma1,ndens_atom, &
-            electrondens(ndens_atom,ion%h,ion%he))
-       !end_temper = pressr2temper(internal_energy*gamma1,ndens_atom,electrondens(ndens_atom,&
-       !                           ion%end_HII,ion%end_HeII,ion%end_HeIII))
+       end_temper = pressr2temper(internal_energy*(gamma-1.0),ndens_atom, &
+            electrondens(ndens_atom,ion_h,ion_he))
        
     endif
     
