@@ -1,3 +1,4 @@
+import logging
 import sys
 sys.path.append("../../../")
 import pyc2ray as pc2r
@@ -30,6 +31,7 @@ t_evol = 5e8 # years
 
 # Create C2Ray object
 sim = pc2r.C2Ray_Test(paramfile)
+logger = logging.getLogger("pyc2ray.c2ray_test")
 
 # Generate redshift list (test case)
 zred_array = sim.generate_redshift_array(numzred+1,t_evol/numzred)
@@ -45,9 +47,9 @@ for k in range(len(zred_array)-1):
     zi = zred_array[k]       # Start redshift
     zf = zred_array[k+1]     # End redshift
 
-    pc2r.printlog(f"\n=================================",sim.logfile)
-    pc2r.printlog(f"Doing redshift {zi:.3f} to {zf:.3f}",sim.logfile)
-    pc2r.printlog(f"=================================\n",sim.logfile)
+    logger.info("=================================")
+    logger.info(f"Doing redshift {zi:.3f} to {zf:.3f}")
+    logger.info("=================================")
 
     # Compute timestep of current redshift slice
     dt = sim.set_timestep(zi,zf,num_steps_between_slices)
@@ -64,7 +66,9 @@ for k in range(len(zred_array)-1):
     # Loop over timesteps
     for t in range(num_steps_between_slices):
         tnow = time.time()
-        pc2r.printlog(f"\n --- Timestep {t+1:n}. Redshift: z = {sim.zred : .3f} Wall clock time: {tnow - tinit : .3f} seconds --- \n",sim.logfile)
+        logger.info(
+            f"--- Timestep {t+1:n}. Redshift: z = {sim.zred : .3f} Wall clock time: {tnow - tinit : .3f} seconds ---"
+        )
 
         # Evolve Cosmology: increment redshift and scale physical quantities (density, proper cell size, etc.)
         # If cosmology is disabled in parameter, this step does nothing
@@ -75,4 +79,4 @@ for k in range(len(zred_array)-1):
 
 # Write final output
 sim.write_output(zf)
-pc2r.printlog(f"Done. Final time: {time.time() - tinit : .3f} seconds",sim.logfile)
+logger.info(f"Done. Final time: {time.time() - tinit : .3f} seconds")
