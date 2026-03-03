@@ -2,6 +2,7 @@ import atexit
 import logging
 import os
 from pathlib import Path
+from typing import TypeAlias
 
 import numpy as np
 import tools21cm as t2c
@@ -40,7 +41,9 @@ from pyc2ray.utils.sourceutils import FloatArray, IntArray
 
 logger = logging.getLogger(__name__)
 
-PARAMETERS_MAP = {
+ParameterClass: TypeAlias = type[YmlParameters]
+
+PARAMETERS_MAP: dict[str, tuple[str, ParameterClass]] = {
     "Abundances": ("abundance_params", AbundancesParameters),
     "BlackBodySource": ("blackbody_params", BlackBodyParameters),
     "CGS": ("cgs_params", CGSParameters),
@@ -114,6 +117,19 @@ PARAMETERS_MAP = {
 
 
 class C2Ray:
+
+    abundance_params: AbundancesParameters
+    blackbody_params: BlackBodyParameters
+    cgs_params: CGSParameters
+    cosmology_params: CosmologyParameters
+    grid_params: GridParameters
+    material_params: MaterialParameters
+    output_params: OutputParameters
+    photo_params: PhotoParameters
+    raytracing_params: RaytracingParameters
+    sinks_params: SinksParameters
+    sources_params: SourcesParameters
+
     def __init__(self, paramfile: PathType) -> None:
         """Basis class for a C2Ray Simulation
 
