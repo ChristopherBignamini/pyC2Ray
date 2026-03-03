@@ -1,3 +1,4 @@
+import logging
 import sys
 sys.path.append("../../../")
 import pyc2ray as pc2r
@@ -14,11 +15,12 @@ args = parser.parse_args()
 num_steps_between_slices = 10
 numzred = 2
 paramfile = "parameters.yml"
-N = 128
-use_octa = args.gpu
 
 # Create C2Ray object
-sim = pc2r.C2Ray_Test(paramfile, N, use_octa)
+sim = pc2r.C2Ray_Test(paramfile)
+
+# Get logger
+logger = logging.getLogger("pyc2ray.c2ray_test")
 
 # Generate redshift list (test case)
 zred_array = sim.generate_redshift_array(numzred,1e7)
@@ -32,21 +34,15 @@ tinit = time.time()
 
 # Setup density
 avgdens = 1e-3
-xc = np.linspace(0,14,N)
-X,Y,Z = np.meshgrid(xc,xc,xc)
 shadow_pos = np.array([76,76,63])
 shadow_radius = 8
 shadow_fact = 6
-ndens = avgdens*np.ones((N,N,N))
-for i in range(0,N):
-    for j in range(0,N):
-        for k in range(0,N):
+ndens = avgdens*np.ones((sim.N,sim.N,sim.N))
+for i in range(0,sim.N):
+    for j in range(0,sim.N):
+        for k in range(0,sim.N):
             if (i-shadow_pos[0])**2 + (j-shadow_pos[1])**2 + (k-shadow_pos[2])**2 < shadow_radius**2:
                 ndens[i,j,k] = shadow_fact*avgdens
-
-# Statistics
-mean_xfrac = np.empty(num_steps_between_slices)
-mean_ionrate = np.empty(num_steps_between_slices)
 
 for k in range(len(zred_array)-1):
 
@@ -64,13 +60,13 @@ for k in range(len(zred_array)-1):
     #sim.set_constant_average_density(avgdens,0) 
     sim.ndens = ndens
 
-    pc2r.printlog(f"\n=================================",sim.logfile)
-    pc2r.printlog(f"Doing redshift {zi:.3f} to {zf:.3f}",sim.logfile)
-    pc2r.printlog(f"=================================\n",sim.logfile)
+    logger.info("=================================")
+    logger.info(f"Doing redshift {zi:.3f} to {zf:.3f}")
+    logger.info("=================================")
     # Do num_steps_between_slices timesteps
     for t in range(num_steps_between_slices):
         tnow = time.time()
-        pc2r.printlog(f"\n --- Timestep {t+1:n}. Redshift: z = {sim.zred : .3f} Wall clock time: {tnow - tinit : .3f} seconds --- \n",sim.logfile)
+        logger.info(f"\n --- Timestep {t+1:n}. Redshift: z = {sim.zred : .3f} Wall clock time: {tnow - tinit : .3f} seconds --- \n")
 
         # Evolve Cosmology: increment redshift and scale physical quantities (density, proper cell size, etc.)
         # If cosmology is disabled in parameter, this step does nothing (checked internally by the class)
@@ -89,4 +85,4 @@ if args.plot:
 
 # Write final output
 sim.write_output(zf)
-pc2r.printlog(f"Done. Final time: {time.time() - tinit : .3f} seconds",sim.logfile)
+logger.info(f"Done. Final time: {time.time() - tinit : .3f} seconds")
