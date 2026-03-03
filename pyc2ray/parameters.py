@@ -75,7 +75,7 @@ class GridParameters(YmlParameters):
     """Parameters to set up the simulation volume"""
 
     # Box size in comoving Mpc
-    boxsize: float = 22.
+    boxsize: float = 22.0
     # Side of the mesh grid
     meshsize: int = 256
     # Use GPU acceleration
@@ -99,7 +99,7 @@ class RaytracingParameters(YmlParameters):
     # Number of sources to be processed in parallel
     source_batch_size: int = 1
     # Which fraction of the cells can be left unconverged
-    convergence_fraction: float = 1.e-4
+    convergence_fraction: float = 1.0e-4
 
 
 @dataclass
@@ -111,7 +111,7 @@ class MaterialParameters(YmlParameters):
     # Initial Ionized fraction of the grid
     xh0: float = 1.2e-3
     # Constant average density, comoving value
-    avg_dens: float =1.87e-7
+    avg_dens: float = 1.87e-7
 
 
 @dataclass
