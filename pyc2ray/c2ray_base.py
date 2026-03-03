@@ -35,6 +35,19 @@ from .utils.logutils import configure_logger
 
 logger = logging.getLogger(__name__)
 
+PARAMETERS_MAP = {
+    "Abundances": ("abundance_params", AbundancesParameters),
+    "BlackBodySource": ("blackbody_params", BlackBodyParameters),
+    "CGS": ("cgs_params", CGSParameters),
+    "Cosmology": ("cosmology_params", CosmologyParameters),
+    "Grid": ("grid_params", GridParameters),
+    "Material": ("material_params", MaterialParameters),
+    "Output": ("output_params", OutputParameters),
+    "Photo": ("photo_params", PhotoParameters),
+    "Raytracing": ("raytracing_params", RaytracingParameters),
+    "Sinks": ("sinks_params", SinksParameters),
+    "Sources": ("sources_params", SourcesParameters),
+}
 
 # ======================================================================
 # This file defines the abstract C2Ray object class, which is the basis
@@ -103,10 +116,6 @@ class C2Ray:
         ----------
         paramfile : str
             Name of a YAML file containing parameters for the C2Ray simulation
-        Nmesh : int
-            Mesh size (number of cells in each dimension)
-        use_gpu : bool
-            Whether to use the GPU-accelerated ASORA library for raytracing
 
         """
         # Read YAML parameter file and set main properties
@@ -877,17 +886,15 @@ This corresponds to %.3f grid cells.
     def _read_paramfile(self, paramfile):
         """Read in YAML parameter file"""
         ld = YmlParameters.load_yaml(paramfile)
-        self.output_params = OutputParameters.from_dict(ld["Output"])
-        self.grid_params = GridParameters.from_dict(ld["Grid"])
-        self.raytracing_params = RaytracingParameters.from_dict(ld["Raytracing"])
-        self.material_params = MaterialParameters.from_dict(ld["Material"])
-        self.cgs_params = CGSParameters.from_dict(ld["CGS"])
-        self.cosmology_params = CosmologyParameters.from_dict(ld["Cosmology"])
-        self.abundance_params = AbundancesParameters.from_dict(ld["Abundances"])
-        self.photo_params = PhotoParameters.from_dict(ld["Photo"])
-        self.sinks_params = SinksParameters.from_dict(ld["Sinks"])
-        self.blackbody_params = BlackBodyParameters.from_dict(ld["BlackBodySource"])
-        self.sources_params = SourcesParameters.from_dict(ld["Sources"])
+        for key, (attr_name, params_cls) in PARAMETERS_MAP.items():
+            if key in ld:
+                setattr(self, attr_name, params_cls.from_dict(ld[key]))
+        missing_keys = [key for key in PARAMETERS_MAP if key not in ld]
+        for key in missing_keys:
+            logger.warning(
+                f"Key '{key}' not found in parameter file. Using default attribute values."
+            )
+            setattr(self, PARAMETERS_MAP[key][0], PARAMETERS_MAP[key][1]())
 
     def _gpu_close(self):
         """Deallocate GPU memory"""
