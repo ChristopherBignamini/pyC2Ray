@@ -31,6 +31,8 @@ t_evol = 5e8 # years
 
 # Create C2Ray object
 sim = pc2r.C2Ray_Test(paramfile)
+
+# Get logger
 logger = logging.getLogger("pyc2ray.c2ray_test")
 
 # Generate redshift list (test case)
