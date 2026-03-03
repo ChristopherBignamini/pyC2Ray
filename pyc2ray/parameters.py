@@ -59,7 +59,7 @@ class OutputParameters(YmlParameters):
     """Output setup"""
 
     # Directory where results and log files are stored
-    results_basename: str
+    results_basename: str = "pyC2Ray_results"
     # Directory where input files are stored
     inputs_basename: OptStr = None
     # Basename of the sources file
@@ -75,15 +75,15 @@ class GridParameters(YmlParameters):
     """Parameters to set up the simulation volume"""
 
     # Box size in comoving Mpc
-    boxsize: float
+    boxsize: float = 22.
     # Side of the mesh grid
-    meshsize: int
+    meshsize: int = 256
     # Use GPU acceleration
-    gpu: bool
+    gpu: bool = False
     # Use MPI parallelization
-    mpi: bool
+    mpi: bool = False
     # Resume a simulation
-    resume: bool
+    resume: bool = False
 
 
 @dataclass
@@ -91,15 +91,15 @@ class RaytracingParameters(YmlParameters):
     """ASORA Raytracing parameters"""
 
     # Photon loss fraction for the subbox algorithm
-    loss_fraction: float
+    loss_fraction: float = 1e-2
     # Size increase of subboxes around sources
-    subboxsize: int
+    subboxsize: int = 128
     # Maximum subbox size for the subbox algorithm
-    max_subbox: int
+    max_subbox: int = 1000
     # Number of sources to be processed in parallel
-    source_batch_size: int
+    source_batch_size: int = 1
     # Which fraction of the cells can be left unconverged
-    convergence_fraction: float
+    convergence_fraction: float = 1.e-4
 
 
 @dataclass
@@ -107,11 +107,11 @@ class MaterialParameters(YmlParameters):
     """Properties of physical quantities in the simulation volume"""
 
     # Initial Temperature of the grid
-    temp0: float
+    temp0: float = 1e4
     # Initial Ionized fraction of the grid
-    xh0: float
+    xh0: float = 1.2e-3
     # Constant average density, comoving value
-    avg_dens: float
+    avg_dens: float =1.87e-7
 
 
 @dataclass
@@ -119,11 +119,11 @@ class CGSParameters(YmlParameters):
     """Miscellaneous physical constants"""
 
     # Hydrogen recombination parameter (power law index)
-    albpow: float
+    albpow: float = -0.7
     # Hydrogen recombination parameter (value at 10^4 K)
-    bh00: float
+    bh00: float = 2.59e-13
     # Helium0 recombination parameter (power law index)
-    alcpow: float
+    alcpow: float = -0.67
     # Hydrogen ionization energy (in eV)
     eth0: float = 13.598
     # Helium I ionization energy (in eV)
@@ -147,15 +147,15 @@ class CosmologyParameters(YmlParameters):
     """Cosmological Parameters"""
 
     # Global flag to use cosmology
-    cosmological: bool
+    cosmological: bool = False
     # Reduced Hubble constant
-    h: float
+    h: float = 0.7
     # Omega matter t=0
-    Omega0: float
+    Omega0: float = 0.27
     # Omega baryon t=0
-    Omega_B: float
+    Omega_B: float = 0.043
     # Initial redshift of the simulation
-    zred_0: float
+    zred_0: float = 9.0
     # Temperature of CMB in Kelvin
     cmbtemp: float = 2.726
 
@@ -180,19 +180,19 @@ class PhotoParameters(YmlParameters):
     """Parameters governing photoionization"""
 
     # HI cross section at its ionizing frequency (weighted by freq_factor)
-    sigma_HI_at_ion_freq: float
+    sigma_HI_at_ion_freq: float = 6.30e-18
     # Minimum optical depth for tables
-    minlogtau: float
+    minlogtau: float = -20
     # Maximum optical depth for tables
-    maxlogtau: float
+    maxlogtau: float = 4
     # Number of table points
-    NumTau: int
+    NumTau: int = 20000
     # Whether or not to use grey opacity (i.e. cross-section is frequency-independent)
-    grey: bool
+    grey: bool = False
     # Type of source to use
-    SourceType: str
+    SourceType: str = "blackbody"
     # Whether to compute heating rates arrays (NOT USED BY CHEMISTRY SO FAR)
-    compute_heating_rates: bool
+    compute_heating_rates: bool = False
     # Name of the SED table file
     sed_table: str = ""
 
@@ -202,13 +202,13 @@ class SinksParameters(YmlParameters):
     """Parameters for sinks"""
 
     # Clumping model, values are "constant", "redshift", "density" or "stochastic"
-    clumping_model: str
+    clumping_model: str = "constant"
     # Mean-free-path model "constant", "Choudhury09"
-    mfp_model: str
+    mfp_model: str = "constant"
     # Clumping factor for the constant model
-    clumping: OptFloat = None
+    clumping: float = 5.0
     # Maximum comoving distance for photons from source
-    R_max_cMpc: OptFloat = None
+    R_max_cMpc: float = 15.0
     # Free parameter for the Choudhury09 mean-free-path model in cMpc units
     A_mfp: OptFloat = None
     # Spectral index of the Choudhury09 mean-free-path model redshift evolution
@@ -236,9 +236,9 @@ class BlackBodyParameters(YmlParameters):
     """Parameters for Black Body source type"""
 
     # Effective temperature of Black Body source
-    Teff: float
+    Teff: float = 5e4
     # Power-law index for the frequency dependence of the photoionization cross section
-    cross_section_pl_index: float
+    cross_section_pl_index: float = 2.8
 
 
 @dataclass
