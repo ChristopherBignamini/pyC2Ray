@@ -3,9 +3,7 @@ import sys
 sys.path.append("../../../")
 import pyc2ray as pc2r
 import time
-import numpy as np
 import argparse
-import astropy.units as u
 
 parser = argparse.ArgumentParser()
 parser.add_argument("-mode",type=str,default="coarse")
@@ -35,7 +33,6 @@ else:
 
 num_steps_between_slices = 1        # Number of timesteps between redshift slices
 ndens0 = 1.87e-7
-use_octa = args.gpu                   # Determines which raytracing algorithm to use
 t_evol = 5e8 # years
 
 # Create C2Ray object
