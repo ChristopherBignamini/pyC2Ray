@@ -1,0 +1,711 @@
+import math
+import importlib
+from dataclasses import dataclass, field
+from typing import List, Tuple, Optional
+import numpy as np
+
+@dataclass
+class Source:
+    """Represents a single radiation source.
+
+    Attributes
+    ----------
+    pos : np.ndarray
+        Source position in 3D Cartesian coordinates (shape `(3,)`).
+    strength : float
+        Source emissivity/intensity used by downstream physics models.
+    radius : float
+        Maximum tracing/influence radius for this source.
+    gid : Optional[int]
+        Optional global source identifier.
+    """
+    pos: np.ndarray          # shape (3,)
+    strength: float          # e.g. photon rate
+    radius: float            # maximum tracing radius
+    gid: Optional[int] = None 
+
+
+@dataclass
+class Group:
+    """Container for a set of sources grouped for joint processing.
+
+    Attributes
+    ----------
+    sources : List[Source]
+        Sources that belong to this group.
+    center : np.ndarray
+        Center of the enclosing sphere of grouped source spheres (shape `(3,)`).
+    radius : float
+        Radius of the enclosing sphere.
+    bbox_min : np.ndarray
+        Minimum corner of the axis-aligned bounding box around the group.
+    bbox_max : np.ndarray
+        Maximum corner of the axis-aligned bounding box around the group.
+    nvox_local : int
+        Estimated number of local voxels covered by the group bounding box.
+    cost : float
+        Estimated computational cost for this group.
+    """
+    sources: List[Source] = field(default_factory=list)
+    center: np.ndarray = field(default_factory=lambda: np.zeros(3))
+    radius: float = 0.0      # enclosing sphere radius for union of balls
+    bbox_min: np.ndarray = field(default_factory=lambda: np.zeros(3))
+    bbox_max: np.ndarray = field(default_factory=lambda: np.zeros(3))
+    nvox_local: int = 0
+    cost: float = 0.0
+
+    def source_ids(self):
+        """Return the list of source global IDs in this group."""
+        return [s.gid for s in self.sources]
+
+
+def enclosing_sphere(
+    centers: np.ndarray,
+    radii: np.ndarray,
+    max_iter: int = 200,
+    tol: float = 1e-8,
+) -> Tuple[np.ndarray, float]:
+    """Approximate the minimum enclosing sphere of spheres/balls.
+
+    The objective is:
+        minimize_c max_i ||c - x_i|| + r_i
+
+    Parameters
+    ----------
+    centers : np.ndarray
+        Sphere centers, shape `(N, 3)`.
+    radii : np.ndarray
+        Sphere radii, shape `(N,)`.
+    max_iter : int
+        Maximum number of fixed-point iterations.
+    tol : float
+        Convergence tolerance on center displacement.
+
+    Returns
+    -------
+    Tuple[np.ndarray, float]
+        Estimated enclosing sphere center and radius.
+    """
+    if len(centers) == 0:
+        return np.zeros(3), 0.0
+    if len(centers) == 1:
+        return centers[0].copy(), float(radii[0])
+
+    c = centers.mean(axis=0)
+
+    for k in range(max_iter):
+        d = np.linalg.norm(centers - c[None, :], axis=1) + radii
+        j = np.argmax(d)
+        direction = centers[j] - c
+        norm = np.linalg.norm(direction)
+        if norm > 0.0:
+            direction = direction / norm
+        else:
+            direction = np.zeros(3)
+
+        # diminishing step
+        eta = 1.0 / (k + 2.0)
+        c_new = c + eta * direction * max(1e-12, np.linalg.norm(centers[j] - c))
+
+        if np.linalg.norm(c_new - c) < tol:
+            c = c_new
+            break
+        c = c_new
+
+    R = np.max(np.linalg.norm(centers - c[None, :], axis=1) + radii)
+    return c, float(R)
+
+
+def bounding_box_from_sphere(center: np.ndarray, radius: float) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Compute axis-aligned bounding box corners from sphere center/radius.
+
+    Parameters
+    ----------
+    center : np.ndarray
+        Sphere center (shape `(3,)`).
+    radius : float
+        Sphere radius.
+
+    Returns
+    -------
+    Tuple[np.ndarray, np.ndarray]
+        Minimum and maximum corners of the bounding box.
+    """
+    return center - radius, center + radius
+
+
+def morton_like_key(p: np.ndarray, domain_min: np.ndarray, domain_max: np.ndarray, bits: int = 10) -> int:
+    """
+    Lightweight Morton-like ordering. 
+    Maps point to integer grid then interleaves bits.
+
+    Parameters
+    ----------
+    p : np.ndarray
+        Point coordinates (shape `(3,)`).
+    domain_min : np.ndarray
+        Minimum corner of the domain (shape `(3,)`).
+    domain_max : np.ndarray
+        Maximum corner of the domain (shape `(3,)`).
+    bits : int
+        Number of bits per dimension for the grid. Total key bits will be 3x this.
+
+    Returns
+    -------
+    int     Morton-like key for the point.
+    """
+    # Normalize to [0, 1]
+    x = np.clip((p - domain_min) / np.maximum(domain_max - domain_min, 1e-12), 0.0, 1.0 - 1e-12)
+
+    # Scale to integer by shifting by bits. 
+    grid = (x * (1 << bits)).astype(int)
+
+    def split_by_3(v: int) -> int:
+        out = 0
+        for i in range(bits):
+            out |= ((v >> i) & 1) << (3 * i)
+        return out
+
+    return split_by_3(grid[0]) | (split_by_3(grid[1]) << 1) | (split_by_3(grid[2]) << 2)
+
+
+
+@dataclass
+class VariableResolutionGrid:
+    """Prototype variable-resolution grid model.
+
+    Attributes
+    ----------
+    domain_min : np.ndarray
+        Minimum domain corner (shape `(3,)`).
+    domain_max : np.ndarray
+        Maximum domain corner (shape `(3,)`).
+    patches : List[Tuple[np.ndarray, np.ndarray, float]]
+        Rectangular subdomains described as `(pmin, pmax, dx)`, where `dx`
+        is the local cell size in that patch.
+    """
+    domain_min: np.ndarray
+    domain_max: np.ndarray
+    patches: List[Tuple[np.ndarray, np.ndarray, float]]  # (pmin, pmax, dx)
+
+    def overlap_volume(self, a_min, a_max, b_min, b_max) -> float:
+        """Return intersection volume between two axis-aligned boxes."""
+        lo = np.maximum(a_min, b_min)
+        hi = np.minimum(a_max, b_max)
+        d = np.maximum(0.0, hi - lo)
+        return float(d[0] * d[1] * d[2])
+
+    def estimate_voxels_in_bbox(self, bbox_min: np.ndarray, bbox_max: np.ndarray) -> int:
+        """Estimate voxel count in a bbox by summing patch contributions."""
+        total = 0.0
+        for pmin, pmax, dx in self.patches:
+            vol = self.overlap_volume(bbox_min, bbox_max, pmin, pmax)
+            if vol > 0.0:
+                total += vol / (dx ** 3)
+        return int(math.ceil(total))
+
+
+def evaluate_group(group_sources: List[Source], grid: VariableResolutionGrid) -> Group:
+    """
+    Build a `Group` and compute its geometric and cost properties.
+
+    Parameters
+    ----------
+    group_sources : List[Source]
+        Sources that belong to this group.
+    grid : VariableResolutionGrid
+        Grid model used to estimate local voxel counts.
+
+    Returns
+    -------
+    Group     Group object with computed center, radius, bounding box, local voxel count, and cost.
+    """
+    centers = np.array([s.pos for s in group_sources], dtype=float)
+    radii = np.array([s.radius for s in group_sources], dtype=float)
+
+    c, R = enclosing_sphere(centers, radii)
+    bbox_min, bbox_max = bounding_box_from_sphere(c, R)
+    nvox = grid.estimate_voxels_in_bbox(bbox_min, bbox_max)
+
+    # simple cost model: number of sources times local voxel count
+    cost = len(group_sources) * nvox
+
+    return Group(
+        sources=list(group_sources),
+        center=c,
+        radius=R,
+        bbox_min=bbox_min,
+        bbox_max=bbox_max,
+        nvox_local=nvox,
+        cost=cost,
+    )
+
+
+def build_groups(
+    sources: List[Source],
+    grid: VariableResolutionGrid,
+    r_group_max: float,
+    nsrc_max: int,
+    nvox_max: int,
+    cost_max: float,
+) -> List[Group]:
+    """Grouping of sources in Morton-like spatial order.
+
+    Sources are sorted spatially, then accumulated into a running group until
+    the radius constraint is violated.
+
+    Parameters
+    ----------
+    sources : List[Source]
+        List of sources to group.
+    grid : VariableResolutionGrid
+        Grid model used to estimate local voxel counts for groups.
+    r_group_max : float
+        Maximum allowed group radius (enclosing sphere of source spheres).
+    nsrc_max : int
+        Maximum allowed number of sources in a group.
+    nvox_max : int
+        Maximum allowed number of local voxels covered by the group bounding box.
+    cost_max : float
+        Maximum allowed computational cost for the group.
+
+    Returns
+    -------
+    List[Group]     List of groups that satisfy the constraints.
+    """
+
+    if not sources:
+        return []
+
+    # spatial ordering
+    dmin, dmax = grid.domain_min, grid.domain_max
+    ordered = sorted(sources, key=lambda s: morton_like_key(s.pos, dmin, dmax))
+
+    groups: List[Group] = []
+    current: List[Source] = []
+
+    def valid(g: Group) -> bool:
+        return (
+            g.radius <= r_group_max
+            # and len(g.sources) <= nsrc_max
+            # and g.nvox_local <= nvox_max
+            # and g.cost <= cost_max
+        )
+
+    for s in ordered:
+        if not current:
+            current = [s]
+            continue
+
+        trial = current + [s]
+        gtrial = evaluate_group(trial, grid)
+
+        if valid(gtrial):
+            current = trial
+        else:
+            groups.append(evaluate_group(current, grid))
+            current = [s]
+
+    if current:
+        groups.append(evaluate_group(current, grid))
+
+    return groups
+
+
+def assign_groups_to_ranks(groups: List[Group], nranks: int):
+    """
+    Groups to ranks assignement according to cost.
+
+    Parameters
+    ----------
+    groups : List[Group]
+        List of groups to assign.
+    nranks : int
+        Number of ranks to distribute groups across.
+
+    Returns
+    Tuple[List[List[Group]], List[float]]
+        A tuple of (rank_groups, rank_costs), where rank_groups is a list of lists of groups assigned to each rank,
+        and rank_costs is the total cost for each rank. 
+    """
+    rank_groups = [[] for _ in range(nranks)]
+    rank_costs = [0.0 for _ in range(nranks)]
+
+    for g in sorted(groups, key=lambda x: x.cost, reverse=True):
+        r = int(np.argmin(rank_costs))
+        rank_groups[r].append(g)
+        rank_costs[r] += g.cost
+
+    return rank_groups, rank_costs
+
+
+
+def generate_sources(num_cluster_sources: int = 70, cluster_center: np.ndarray = None, cluster_width: float = 0.02,
+                     num_sparse_sources: int = 30, source_strength: float = 1.0, r_max_lls: float = 12.0, boxsize: float = 100.0):
+    """
+    Generate toy sources in a clustered + sparse configuration.
+
+    All positions and radii are expressed in comoving Mpc/h.
+
+    Parameters
+    ----------
+    num_cluster_sources : int
+        Number of sources in the dense cluster.
+    cluster_center : Optional[np.ndarray]
+        Center of the cluster (shape `(3,)`). If None, defaults to the box center.
+    cluster_width : float
+        Standard deviation of the cluster in each dimension, as a fraction of the box size.
+    num_sparse_sources : int
+        Number of sources uniformly distributed across the box outside the cluster.
+    source_strength : float
+        Emissivity/intensity assigned to each source.
+    r_max_lls : float
+        Maximum tracing/influence radius for each source, based on the Lyman-limit-system mean free path.
+    boxsize : float
+        Size of the cubic domain in comoving Mpc/h.
+
+    Returns
+    -------
+    List[Source]   List of generated sources with positions, strengths, and radii.
+    """
+    rng = np.random.default_rng(23)
+
+    sources = []
+
+    # Dense cluster
+    if cluster_center is None:
+        cluster_center = np.array([0.5, 0.5, 0.5]) * boxsize
+    cluster_sigma = cluster_width * boxsize
+
+    for i in range(num_cluster_sources):
+        pos = cluster_center + rng.normal(scale=cluster_sigma, size=3)
+        strength = source_strength
+        sources.append(Source(pos=pos, strength=strength, radius=r_max_lls, gid=i))
+
+    # Sparse sources across the full box
+    for i in range(num_cluster_sources, num_cluster_sources + num_sparse_sources):
+        pos = rng.uniform(0, boxsize, size=3)
+        strength = source_strength
+        sources.append(Source(pos=pos, strength=strength, radius=r_max_lls, gid=i))
+
+    return sources
+
+def generate_grid(
+    boxsize: float,
+    coarse_cell_dx: float,
+    refined_cell_dx: float = -1.0):
+    """
+    Generate a grid with optional refined patch.
+    
+    Parameters    
+    ----------
+    boxsize : float
+        Size of the cubic domain in comoving Mpc/h.
+    coarse_cell_dx : float
+        Size of the coarse grid cells.
+    refined_cell_dx : float, optional
+        Size of the refined grid cells. If -1.0, no refined patch is generated.
+
+    Returns
+    -------
+    VariableResolutionGrid
+        A grid object with the specified patches.
+    """
+
+    domain_min = np.array([0.0, 0.0, 0.0])
+    domain_max = np.array([boxsize, boxsize, boxsize])
+
+    patches = [
+        # coarse background
+        (domain_min.copy(), domain_max.copy(), coarse_cell_dx),
+    ]
+
+    if refined_cell_dx > 0.0 and refined_cell_dx < coarse_cell_dx:
+        patches.append(
+            (
+                np.array([0.10, 0.10, 0.10]) * boxsize,
+                np.array([0.35, 0.35, 0.35]) * boxsize,
+                refined_cell_dx,
+            )
+        )
+
+
+    return VariableResolutionGrid(domain_min=domain_min, domain_max=domain_max, patches=patches)
+
+def _box_faces(pmin: np.ndarray, pmax: np.ndarray):
+    """
+    Return the six faces of a box.
+    
+    Parameters
+    ----------
+    pmin : np.ndarray
+        Minimum corner of the box (shape `(3,)`).
+    pmax : np.ndarray
+        Maximum corner of the box (shape `(3,)`).
+
+    Returns
+    -------
+    List[List[np.ndarray]]
+        List of 6 faces, each face is a list of 4 corner points (shape `(3,)`).
+    """
+    x0, y0, z0 = pmin
+    x1, y1, z1 = pmax
+    v = np.array(
+        [
+            [x0, y0, z0],
+            [x1, y0, z0],
+            [x1, y1, z0],
+            [x0, y1, z0],
+            [x0, y0, z1],
+            [x1, y0, z1],
+            [x1, y1, z1],
+            [x0, y1, z1],
+        ]
+    )
+    return [
+        [v[0], v[1], v[2], v[3]],  # bottom
+        [v[4], v[5], v[6], v[7]],  # top
+        [v[0], v[1], v[5], v[4]],
+        [v[1], v[2], v[6], v[5]],
+        [v[2], v[3], v[7], v[6]],
+        [v[3], v[0], v[4], v[7]],
+    ]
+
+
+def plot_grid_and_sources(
+    grid: VariableResolutionGrid,
+    sources: List[Source],
+    groups: Optional[List[Group]] = None,
+    plot_sources: bool = True,
+    plot_groups: bool = True,
+    plot_bbox: bool = True
+):
+    """
+    Visualize grid patches, sources, and optional group envelopes in 3D.
+    
+    Parameters    
+    ----------
+    grid : VariableResolutionGrid
+        Grid model with patches to visualize.
+    sources : List[Source]
+        List of sources to plot as points.
+    groups : Optional[List[Group]]
+        Optional list of groups to plot enclosing spheres and bounding boxes.
+    plot_sources : bool
+        Whether to plot source positions as points.
+    plot_groups : bool
+        Whether to plot group enclosing spheres.
+    plot_bbox : bool
+        Whether to plot group bounding boxes.
+        
+    """
+    try:
+        plt = importlib.import_module("matplotlib.pyplot")
+        art3d = importlib.import_module("mpl_toolkits.mplot3d.art3d")
+        Poly3DCollection = art3d.Poly3DCollection
+    except ImportError:
+        print("Matplotlib is not available. Skipping grid plot.")
+        return
+
+    fig = plt.figure(figsize=(9, 7))
+    ax = fig.add_subplot(111, projection="3d")
+
+    # Plot grid patches as translucent boxes. Finer dx is drawn more opaque.
+    dx_values = [dx for _, _, dx in grid.patches]
+    dx_min = min(dx_values)
+    dx_max = max(dx_values)
+    denom = max(dx_max - dx_min, 1e-12)
+
+    # Plot grid patechs in order of decreasing resolution (increasing opacity) for better visibility.
+    for pmin, pmax, dx in sorted(grid.patches, key=lambda t: t[2], reverse=True):
+        rel = (dx - dx_min) / denom
+        color = plt.cm.Blues(0.35 + 0.6 * (1.0 - rel))
+
+        faces = _box_faces(pmin, pmax)
+        poly = Poly3DCollection(
+            faces,
+            facecolors=(0.0, 0.0, 0.0, 0.0),
+            edgecolors=(color[0], color[1], color[2], 0.55),
+            linewidths=0.7,
+        )
+        ax.add_collection3d(poly)
+
+    # Plot sources as points, optionally colored by group membership.
+    if plot_sources:
+        pos = np.array([s.pos for s in sources], dtype=float)
+        if groups:
+            gid_to_group = {}
+            for ig, g in enumerate(groups):
+                for s in g.sources:
+                    gid_to_group[s.gid] = ig
+
+            group_ids = np.array([gid_to_group.get(s.gid, -1) for s in sources], dtype=int)
+            n_groups = max(len(groups), 1)
+            # Separate colors by group
+            hues = np.mod(np.arange(n_groups) * 0.61803398875, 1.0)
+            sat = np.full(n_groups, 0.9)
+            val = np.full(n_groups, 0.95)
+            hsv = np.stack([hues, sat, val], axis=1)
+            colors_mod = importlib.import_module("matplotlib.colors")
+            palette = colors_mod.hsv_to_rgb(hsv)
+            default_color = np.array([0.45, 0.45, 0.45, 1.0])
+            colors = np.array([
+                np.append(palette[gidx], 1.0) if gidx >= 0 else default_color
+                for gidx in group_ids
+            ])
+            ax.scatter(
+                pos[:, 0],
+                pos[:, 1],
+                pos[:, 2],
+                c=colors,
+                s=22,
+                depthshade=True,
+                label="sources (by group)",
+            )
+        else:
+            ax.scatter(pos[:, 0], pos[:, 1], pos[:, 2], c="crimson", s=18, depthshade=True, label="sources")
+
+    # # Single-source influence spheres as faint wireframes.
+    # u_src = np.linspace(0.0, 2.0 * math.pi, 14)
+    # v_src = np.linspace(0.0, math.pi, 10)
+    # uu_src, vv_src = np.meshgrid(u_src, v_src)
+    # for i, s in enumerate(sources):
+    #     x0, y0, z0 = s.pos
+    #     r0 = s.radius
+    #     xs = x0 + r0 * np.cos(uu_src) * np.sin(vv_src)
+    #     ys = y0 + r0 * np.sin(uu_src) * np.sin(vv_src)
+    #     zs = z0 + r0 * np.cos(vv_src)
+    #     label = "source sphere" if i == 0 else None
+    #     ax.plot_wireframe(xs, ys, zs, rstride=2, cstride=2, color="tab:green", linewidth=1., alpha=0.10, label=label)
+
+    # Plot group envelopes as larger wireframes.
+    if groups and plot_groups:
+        u = np.linspace(0.0, 2.0 * math.pi, 22)
+        v = np.linspace(0.0, math.pi, 14)
+        uu, vv = np.meshgrid(u, v)
+        for i, g in enumerate(groups):
+            if plot_bbox:
+                # Bounding box of the group (edge-only for readability).
+                bb_faces = _box_faces(g.bbox_min, g.bbox_max)
+                bb = Poly3DCollection(
+                    bb_faces,
+                    facecolors=(0.0, 0.0, 0.0, 0.0),
+                    edgecolors=(1.0, 0.55, 0.0, 0.7),
+                    linewidths=0.8,
+                )
+                ax.add_collection3d(bb)
+
+            # Enclosing sphere wireframe.
+            cx, cy, cz = g.center
+            r = g.radius
+            xs = cx + r * np.cos(uu) * np.sin(vv)
+            ys = cy + r * np.sin(uu) * np.sin(vv)
+            zs = cz + r * np.cos(vv)
+            label = "group sphere" if i == 0 else None
+            ax.plot_wireframe(xs, ys, zs, rstride=2, cstride=2, color="tab:blue", linewidth=0.45, alpha=0.25, label=label)
+
+    dmin, dmax = grid.domain_min, grid.domain_max
+    ax.set_xlim(dmin[0], dmax[0])
+    ax.set_ylim(dmin[1], dmax[1])
+    ax.set_zlim(dmin[2], dmax[2])
+    ax.set_xlabel("X")
+    ax.set_ylabel("Y")
+    ax.set_zlabel("Z")
+    ax.set_title("Variable-resolution grid, source spheres, and group envelopes")
+    ax.legend(loc="upper right")
+    fig.tight_layout()
+    plt.show()
+
+
+def main():
+    """Run a complete toy example: source generation, grouping, and plotting."""
+    # ========================================================
+    # Physical / cosmological properties of the domain
+    # ========================================================
+    # Box size in cMpc/h
+    boxsize = 100.0
+
+    # Source distribution parameters
+    num_cluster_sources = 10
+    cluster_center = None  # default is 50% of box size
+    cluster_width = 0.05   # fraction of box size
+    num_sparse_sources = 0
+    source_strength = 1.0
+
+    # Grid structure
+    coarse_cell_N = 256
+    cell_refining_factor = 4.0
+    coarse_cell_dx = boxsize / coarse_cell_N
+    refined_cell_dx = -1.0 #coarse_cell_dx / cell_refining_factor
+
+    # Maximum tracing radius from the Lyman-limit-system
+    # mean free path. Same units as the domain: comoving Mpc/h.
+    lambda_mfp_mpc_h = 20.0
+    r_max_lls = lambda_mfp_mpc_h
+
+    r_max_lls_coarse_cells = lambda_mfp_mpc_h / coarse_cell_dx
+    r_max_lls_refined_cells = lambda_mfp_mpc_h / refined_cell_dx
+
+    # Create source distribution
+    sources = generate_sources(
+        num_cluster_sources=num_cluster_sources,
+        cluster_center=cluster_center,
+        cluster_width=cluster_width,
+        num_sparse_sources=num_sparse_sources,
+        source_strength=source_strength,
+        r_max_lls=r_max_lls,
+        boxsize=boxsize,
+    )
+
+    # Create variable-resolution grid
+    grid = generate_grid(
+        boxsize=boxsize,
+        coarse_cell_dx=coarse_cell_dx,
+        refined_cell_dx=refined_cell_dx
+    )
+
+    # Build groups with a uniform radius constraint based on the LLS mean free path.
+    groups = build_groups(
+        sources=sources,
+        grid=grid,
+        r_group_max=1.5 * r_max_lls,
+        nsrc_max=12,
+        nvox_max=80000,
+        cost_max=500000,
+    )
+
+    # Distribute groups across ranks by estimated cost.
+    rank_groups, rank_costs = assign_groups_to_ranks(groups, nranks=4)
+
+    # Report results and plot. 
+    print(f"Toy box size                = {boxsize:.1f} cMpc/h")
+    print(f"Coarse cell size            = {coarse_cell_dx:.3f} cMpc/h")
+    print(f"Refined cluster cell size   = {refined_cell_dx:.3f} cMpc/h")
+    print(f"Mean free path (LLS)        = {lambda_mfp_mpc_h:.1f} cMpc/h")
+    print(f"R_max_LLS (coarse cells)    = {r_max_lls_coarse_cells:.1f}")
+    print(f"R_max_LLS (refined cells)   = {r_max_lls_refined_cells:.1f}\n")
+
+    print(f"Total sources: {len(sources)}")
+    print(f"Total groups:  {len(groups)}\n")
+    print(f"Using a uniform source radius R_max_LLS = {r_max_lls:.2f} cMpc/h\n")
+
+    for ig, g in enumerate(groups):
+        print(
+            f"Group {ig:02d}: nsrc={len(g.sources):2d}, "
+            f"R={g.radius:6.2f}, nvox={g.nvox_local:7d}, cost={g.cost:10.1f}"
+        )
+
+    print("\nAssignment to ranks:")
+    for r, gs in enumerate(rank_groups):
+        print(f"Rank {r}: {len(gs)} groups, total cost = {rank_costs[r]:.1f}")
+        for g in gs:
+            print(
+                f"   nsrc={len(g.sources):2d}, R={g.radius:6.2f}, "
+                f"nvox={g.nvox_local:7d}, cost={g.cost:10.1f}"
+            )
+
+    plot_grid_and_sources(grid, sources, groups, )
+
+if __name__ == "__main__":
+    main()
