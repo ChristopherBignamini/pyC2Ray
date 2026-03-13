@@ -1,16 +1,52 @@
-from typing import List, Tuple, Optional, Protocol
+import math
+from typing import List, Tuple, Optional
 import numpy as np
 
-# TO BE REMOVED
-class VariableResolutionGrid(Protocol):
-    """Protocol for grid objects used by grouping utilities."""
+class VariableResolutionGrid:
+    """Prototype variable-resolution grid model.
 
+    Attributes
+    ----------
+    domain_min : np.ndarray
+        Minimum domain corner (shape `(3,)`).
+    domain_max : np.ndarray
+        Maximum domain corner (shape `(3,)`).
+    patches : List[Tuple[np.ndarray, np.ndarray, float]]
+        Rectangular subdomains described as `(pmin, pmax, dx)`, where `dx`
+        is the local cell size in that patch.
+    """
     domain_min: np.ndarray
     domain_max: np.ndarray
+    patches: List[Tuple[np.ndarray, np.ndarray, float]]  # (pmin, pmax, dx)
 
-    def estimate_voxels_in_bbox(
-        self, bbox_min: np.ndarray, bbox_max: np.ndarray
-    ) -> int: ...
+    def __init__(
+        self,
+        domain_min: np.ndarray,
+        domain_max: np.ndarray,
+        patches: List[Tuple[np.ndarray, np.ndarray, float]],
+    ) -> None:
+        self.domain_min = np.asarray(domain_min, dtype=float)
+        self.domain_max = np.asarray(domain_max, dtype=float)
+        self.patches = [
+            (np.asarray(pmin, dtype=float), np.asarray(pmax, dtype=float), float(dx))
+            for pmin, pmax, dx in patches
+        ]
+
+    def overlap_volume(self, a_min, a_max, b_min, b_max) -> float:
+        """Return intersection volume between two axis-aligned boxes."""
+        lo = np.maximum(a_min, b_min)
+        hi = np.minimum(a_max, b_max)
+        d = np.maximum(0.0, hi - lo)
+        return float(d[0] * d[1] * d[2])
+
+    def estimate_voxels_in_bbox(self, bbox_min: np.ndarray, bbox_max: np.ndarray) -> int:
+        """Estimate voxel count in a bbox by summing patch contributions."""
+        total = 0.0
+        for pmin, pmax, dx in self.patches:
+            vol = self.overlap_volume(bbox_min, bbox_max, pmin, pmax)
+            if vol > 0.0:
+                total += vol / (dx ** 3)
+        return int(math.ceil(total))
 
 class Source:
     """Represents a single radiation source.
@@ -199,7 +235,7 @@ def evaluate_group(group_sources: List[Source], grid: VariableResolutionGrid) ->
     group_sources : List[Source]
         Sources that belong to this group.
     grid : VariableResolutionGrid
-        Grid model used to estimate local voxel counts.
+        Grid used to estimate local voxel counts.
 
     Returns
     -------
@@ -230,9 +266,9 @@ def build_groups(
     sources: List[Source],
     grid: VariableResolutionGrid,
     r_group_max: float,
-    nsrc_max: int,
-    nvox_max: int,
-    cost_max: float,
+    nsrc_max: int = 12,
+    nvox_max: int = 80000,
+    cost_max: float = 500000
 ) -> List[Group]:
     """Grouping of sources in Morton-like spatial order.
 
@@ -244,7 +280,7 @@ def build_groups(
     sources : List[Source]
         List of sources to group.
     grid : VariableResolutionGrid
-        Grid model used to estimate local voxel counts for groups.
+        Grid used to estimate local voxel counts for groups.
     r_group_max : float
         Maximum allowed group radius (enclosing sphere of source spheres).
     nsrc_max : int
