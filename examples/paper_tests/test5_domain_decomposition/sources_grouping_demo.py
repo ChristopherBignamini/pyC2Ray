@@ -1,45 +1,6 @@
-import math
-import importlib
-from dataclasses import dataclass
-from typing import List, Tuple, Optional
+
 import numpy as np
-
 import pyc2ray.utils.domain_decomposition_utils as dd_utils
-
-@dataclass
-class VariableResolutionGrid:
-    """Prototype variable-resolution grid model.
-
-    Attributes
-    ----------
-    domain_min : np.ndarray
-        Minimum domain corner (shape `(3,)`).
-    domain_max : np.ndarray
-        Maximum domain corner (shape `(3,)`).
-    patches : List[Tuple[np.ndarray, np.ndarray, float]]
-        Rectangular subdomains described as `(pmin, pmax, dx)`, where `dx`
-        is the local cell size in that patch.
-    """
-    domain_min: np.ndarray
-    domain_max: np.ndarray
-    patches: List[Tuple[np.ndarray, np.ndarray, float]]  # (pmin, pmax, dx)
-
-    def overlap_volume(self, a_min, a_max, b_min, b_max) -> float:
-        """Return intersection volume between two axis-aligned boxes."""
-        lo = np.maximum(a_min, b_min)
-        hi = np.minimum(a_max, b_max)
-        d = np.maximum(0.0, hi - lo)
-        return float(d[0] * d[1] * d[2])
-
-    def estimate_voxels_in_bbox(self, bbox_min: np.ndarray, bbox_max: np.ndarray) -> int:
-        """Estimate voxel count in a bbox by summing patch contributions."""
-        total = 0.0
-        for pmin, pmax, dx in self.patches:
-            vol = self.overlap_volume(bbox_min, bbox_max, pmin, pmax)
-            if vol > 0.0:
-                total += vol / (dx ** 3)
-        return int(math.ceil(total))
-
 
 def generate_sources(num_cluster_sources: int = 70, cluster_center: np.ndarray = None, cluster_width: float = 0.02,
                      num_sparse_sources: int = 30, source_strength: float = 1.0, r_max_lls: float = 12.0, boxsize: float = 100.0):
@@ -131,7 +92,7 @@ def generate_grid(
         )
 
 
-    return VariableResolutionGrid(domain_min=domain_min, domain_max=domain_max, patches=patches)
+    return dd_utils.VariableResolutionGrid(domain_min=domain_min, domain_max=domain_max, patches=patches)
 
 def _box_faces(pmin: np.ndarray, pmax: np.ndarray):
     """
