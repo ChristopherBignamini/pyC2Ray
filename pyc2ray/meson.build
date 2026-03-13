@@ -26,6 +26,7 @@ pyc2ray_sources = [
     'tables/multifreq/cross_section_index.py',
     'utils/__init__.py',
     'utils/check_source_formalism.py',
+    'utils/domain_decomposition_utils.py',
     'utils/logutils.py',
     'utils/other_utils.py',
     'utils/source_converter.py',
