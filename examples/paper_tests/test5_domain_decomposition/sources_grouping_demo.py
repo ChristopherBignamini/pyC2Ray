@@ -352,9 +352,10 @@ def main():
     print(f"Using a uniform source radius R_max_LLS = {r_max_lls:.2f} cMpc/h\n")
 
     for ig, g in enumerate(groups):
+        # TODO: I'm only reporting the number of voxels of the first overlapping patch
         print(
             f"Group {ig:02d}: nsrc={len(g.sources):2d}, "
-            f"R={g.radius:6.2f}, nvox={g.nvox_local:7d}, cost={g.cost:10.1f}"
+            f"R={g.radius:6.2f}, nvox={g.get_num_voxels()[0]:7d}, cost={g.cost:10.1f}"
         )
 
     print("\nAssignment to ranks:")
@@ -363,7 +364,7 @@ def main():
         for g in gs:
             print(
                 f"   nsrc={len(g.sources):2d}, R={g.radius:6.2f}, "
-                f"nvox={g.nvox_local:7d}, cost={g.cost:10.1f}"
+                f"nvox={g.get_num_voxels()[0]:7d}, cost={g.cost:10.1f}"
             )
 
     # plot_grid_and_sources(grid, sources, groups, )
