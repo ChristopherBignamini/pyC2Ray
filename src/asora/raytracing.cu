@@ -69,7 +69,7 @@ namespace {
         const photo_tables &ion_tables, const linspace<double> &logtau
     ) {
         auto &&[di, dj, dk] = linthrd2cart(q, s);
-
+        // TODO CB: clarify this part.
         // Since the grid is periodic, we limit the maximum size of the raytraced
         // region to a cube as large as the mesh around the source. See line 93 of
         // evolve_source in C2Ray, this size will depend on if the mesh is even or
@@ -155,6 +155,7 @@ namespace asora {
         // radius. The radius equals the distance from the source to the middle of the
         // faces of the octahedron. To raytrace the whole volume, the octahedron must
         // be 1.5*N in size. Allocate (if necessary) the column density array.
+        // TODO CB: this is probably already taking care of the domain decomposition (we are using m1)
         int q_max = std::ceil(c::sqrt3<> * std::min(R, c::sqrt3<> * m1 / 2.0));
         if (!device::contains(buffer_tag::column_density_HI))
             device::add<double>(
