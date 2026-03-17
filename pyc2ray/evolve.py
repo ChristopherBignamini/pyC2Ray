@@ -10,6 +10,7 @@ from .load_extensions import libasora, libc2ray
 from .utils import display_time
 from .utils.logutils import disable_newline
 from .utils.sourceutils import FloatArray, IntArray, format_sources
+from .utils.domain_decomposition_utils import Group, Source, VariableResolutionGrid, build_groups, assign_groups_to_ranks
 
 __all__ = ["evolve3D"]
 
@@ -69,6 +70,7 @@ def evolve3D(
     colh0: float,
     temph0: float,
     abu_c: float,
+    activate_domain_decomposition: bool = True
 ) -> tuple[FloatArray, FloatArray]:
     """Evolves the ionization fraction over one timestep for the whole grid
 
@@ -124,6 +126,8 @@ def evolve3D(
         Hydrogen ionization energy expressed in K
     abu_c : float
         Carbon abundance
+    activate_domain_decomposition : bool
+        Whether or not compute evolution by using source grouping and domain decomposition.
 
     Returns
     -------
@@ -144,6 +148,7 @@ def evolve3D(
     # Set some constant sizes
     NumSrc = src_flux.shape[0]  # Number of sources
     N = temp.shape[0]  # Mesh size
+    sub_mesh_size = N
     NumCells = N * N * N  # Number of cells/points
     conv_flag = NumCells  # Flag that counts the number of non-converged cells (initialized to non-convergence)
     NumTau = photo_thin_table.shape[0]
@@ -163,35 +168,148 @@ def evolve3D(
     xh_av = np.copy(xh)
     xh_intermed = np.copy(xh)
 
+    # Run source grouping and domain decomposition
+    local_groups = None
+    local_cost = 0.0
+    if use_mpi:
+        logger.info(f"Running on {nprocs} MPI ranks, doing source grouping and domain decomposition...")
+        # Only do source grouping on rank 0, then broadcast the result to the other ranks
+        if rank == 0:
+            source_groups = None
+            if activate_domain_decomposition:
+                # TODO CB: avoid conversion into physical units and back.
+                domain_min = np.array([0.0, 0.0, 0.0])
+                domain_max = np.array([N * dr, N * dr, N * dr])
+                var_grid = VariableResolutionGrid(domain_min = domain_min,
+                                                  domain_max = domain_max,
+                                                  patches = [(domain_min, domain_max, dr)])
+                # TODO CB: check radius value, I'm currently reducing it for testing purposes.
+                source_groups = build_groups(
+                    sources=[Source(i, pos=(np.array(src_pos[:, i], dtype=float) - 0.5) * dr,
+                                    strength=src_flux[i], radius=0.01*R_max_LLS*dr) for i in range(NumSrc)],
+                    grid=var_grid,
+                    nsrc_max = 4)
+                logger.info(f"Created {len(source_groups)} source groups for domain decomposition.")
+            else:
+                source_groups = [Group(sources=[
+                    Source(i, pos=(np.array(src_pos[:, i], dtype=float) - 0.5) * dr,
+                           strength=src_flux[i], radius=0.01*R_max_LLS*dr)]) for i in range(NumSrc)]
+                logger.info("Domain decomposition disabled. Each source is treated as its own group.")
+            rank_groups, rank_costs = assign_groups_to_ranks(source_groups, nranks=nprocs)
+
+
+        else:
+            rank_groups = None
+            rank_costs = 0.0
+
+        # Broadcast source groups to other ranks
+        local_groups = comm.scatter(rank_groups, root=0)
+        local_cost = comm.scatter(rank_costs, root=0)
+
+        # TODO CB: at the moment, the maximum number of local groups per rank is 1
+        if local_groups > 1:
+            raise NotImplementedError("Currently, the code only supports a maximum of 1 local group per rank.")
+
+        # Sequential section to inspect scatter results rank-by-rank.
+        for r in range(nprocs):
+            comm.Barrier()
+            if rank == r:
+                n_local_groups = len(local_groups) if local_groups is not None else 0
+                n_local_sources = (
+                    sum(len(g.sources) for g in local_groups)
+                    if local_groups is not None
+                    else 0
+                )
+                logger.info(
+                    "Scatter check | rank=%d groups=%d sources=%d",
+                    rank,
+                    n_local_groups,
+                    n_local_sources
+                )
+                # TODO CB: I'm only reporting the number of voxels of the first (of the AMR hierarchy) overlapping patch for each group
+                for i, g in enumerate(local_groups):
+                    logger.info(
+                        "Local group index=%d cost=%.3e center=(%.2f, %.2f, %.2f) center in cells=(%.2f, %.2f, %.2f) radius=%.2f radius in cells=(%.2f) box_min=(%d, %d, %d) box_max=(%d, %d, %d)",
+                        i,
+                        float(local_cost) if local_cost is not None else 0.0,
+                        g.center[0] if local_groups and len(local_groups) > 0 else 0.0,
+                        g.center[1] if local_groups and len(local_groups) > 0 else 0.0,
+                        g.center[2] if local_groups and len(local_groups) > 0 else 0.0,
+                        (g.center[0] / dr) if local_groups and len(local_groups) > 0 else 0.0,
+                        (g.center[1] / dr) if local_groups and len(local_groups) > 0 else 0.0,
+                        (g.center[2] / dr) if local_groups and len(local_groups) > 0 else 0.0,
+                        g.radius if local_groups and len(local_groups) > 0 else 0.0,
+                        (g.radius / dr) if local_groups and len(local_groups) > 0 else 0.0,
+                        g.voxels[0][1][0] if local_groups and len(local_groups) > 0 else 0,
+                        g.voxels[0][1][1] if local_groups and len(local_groups) > 0 else 0,
+                        g.voxels[0][1][2] if local_groups and len(local_groups) > 0 else 0,
+                        g.voxels[0][2][0] if local_groups and len(local_groups) > 0 else 0,
+                        g.voxels[0][2][1] if local_groups and len(local_groups) > 0 else 0,
+                        g.voxels[0][2][2] if local_groups and len(local_groups) > 0 else 0
+                    )
+
+        comm.Barrier()
+
+    logger.info("Source groups assigned to ranks.")
+
     # When using GPU raytracing, data has to be reshaped & reformatted and copied to the device
     if use_gpu:
-        # Format input data for the CUDA extension module (flat arrays, C-types,etc)
-        xh_av_flat = np.ravel(xh).astype("float64", copy=True)
-        ndens_flat = np.ravel(ndens).astype("float64", copy=True)
-        if use_mpi:
-            # TODO:       #if(NumSrc > nprocs):
-            perrank = NumSrc // nprocs
-            i_start = int(rank * perrank)
-            if rank != nprocs - 1:
-                i_end = int((rank + 1) * perrank)
-            else:
-                i_end = NumSrc
 
-            # overwrite number of sources
-            NumSrc = i_end - i_start
-            srcpos_flat, normflux_flat = format_sources(
-                src_pos[:, i_start:i_end], src_flux[i_start:i_end]
-            )
-            logger.info(f"...rank={rank:n} has {NumSrc:n} sources.")
+        # Format input data for the CUDA extension module (flat arrays, C-types,etc)
+
+        # If domain_decomposition is active we can limit the grid to be copied to the GPU to the one overlapping with the local groups.
+        if activate_domain_decomposition and local_groups is not None:
+            sub_mesh_size = local_groups[0].get_num_cells_per_side()
+            xh_av_flat = np.ravel(xh_av[local_groups[0].voxels[0][1][0]:local_groups[0].voxels[0][2][0],
+                                        local_groups[0].voxels[0][1][1]:local_groups[0].voxels[0][2][1],
+                                        local_groups[0].voxels[0][1][2]:local_groups[0].voxels[0][2][2]]).astype("float64", copy=True)
+            ndens_flat = np.ravel(ndens[local_groups[0].voxels[0][1][0]:local_groups[0].voxels[0][2][0],
+                                        local_groups[0].voxels[0][1][1]:local_groups[0].voxels[0][2][1],
+                                        local_groups[0].voxels[0][1][2]:local_groups[0].voxels[0][2][2]]).astype("float64", copy=True)
+        else:
+            # Format input data for the CUDA extension module (flat arrays, C-types,etc)
+            xh_av_flat = np.ravel(xh).astype("float64", copy=True)
+            ndens_flat = np.ravel(ndens).astype("float64", copy=True)
+
+        if use_mpi:
+            if activate_domain_decomposition and local_groups is not None:
+                NumSrc = len(local_groups[0].sources)
+                srcpos_flat, normflux_flat = format_sources(
+                    src_pos[:, local_groups[0].get_source_ids()] - local_groups[0].get_offset(),
+                    src_flux[local_groups[0].get_source_ids()]
+                )
+                logger.info(f"...rank={rank:n} has {len(local_groups[0].sources):n} sources in its local group.")
+            else:
+                # TODO:       #if(NumSrc > nprocs):
+                perrank = NumSrc // nprocs
+                i_start = int(rank * perrank)
+                if rank != nprocs - 1:
+                    i_end = int((rank + 1) * perrank)
+                else:
+                    i_end = NumSrc
+
+                # overwrite number of sources
+                NumSrc = i_end - i_start
+                srcpos_flat, normflux_flat = format_sources(
+                    src_pos[:, i_start:i_end], src_flux[i_start:i_end]
+                )
+                logger.info(f"...rank={rank:n} has {NumSrc:n} sources.")
         else:
             srcpos_flat, normflux_flat = format_sources(src_pos, src_flux)
 
         # Copy positions & fluxes of sources to the GPU in advance
         assert libasora is not None
+        # TODO CB: in principle, we don't need to copy the sources in every timestep
+        # since they don't change position or strengtg, right?
         libasora.source_data_to_device(srcpos_flat, normflux_flat)
 
         # Initialize Flat Column density & ionization rate arrays.
         # These are used to store the output of the raytracing module.
+        # TODO CB: find a way to save memory
+        sub_phi_ion_flat = None
+        phi_ion = None
+        if activate_domain_decomposition and local_groups is not None:
+            sub_phi_ion_flat = np.ravel(np.zeros((sub_mesh_size, sub_mesh_size, sub_mesh_size), dtype="float64"))
         phi_ion_flat = np.ravel(np.zeros((N, N, N), dtype="float64"))
 
         # Copy density field to GPU once at the beginning of timestep (!! do_all_sources assumes this !!)
@@ -232,19 +350,43 @@ Convergence Criterion (Number of points): {conv_criterion: n}
         if use_gpu:
             # Use GPU raytracing
             assert libasora is not None
-            libasora.do_all_sources(
-                R_max_LLS,
-                sig,
-                dr,
-                xh_av_flat,
-                phi_ion_flat,
-                NumSrc,
-                N,
-                minlogtau,
-                dlogtau,
-                NumTau,
-                src_batch_size,
-            )
+            if activate_domain_decomposition and local_groups is not None:
+                # TODO CB: avoid call duplication here.
+                libasora.do_all_sources(
+                    R_max_LLS,
+                    sig,
+                    dr,
+                    xh_av_flat,
+                    sub_phi_ion_flat,
+                    NumSrc,
+                    sub_mesh_size,
+                    minlogtau,
+                    dlogtau,
+                    NumTau,
+                    src_batch_size, # Determines the CUDA kernel grid size
+                )
+
+                # Copy the subbox result to the full phi_ion array, taking into account the position of the local group in the full grid.
+                phi_ion = np.reshape(phi_ion_flat, (N, N, N))
+                sub_phi_ion = np.reshape(sub_phi_ion_flat, (sub_mesh_size, sub_mesh_size, sub_mesh_size))
+                phi_ion[local_groups[0].voxels[0][1][0]:local_groups[0].voxels[0][2][0],
+                       local_groups[0].voxels[0][1][1]:local_groups[0].voxels[0][2][1],
+                       local_groups[0].voxels[0][1][2]:local_groups[0].voxels[0][2][2]] = sub_phi_ion
+
+            else:
+                libasora.do_all_sources(
+                    R_max_LLS,
+                    sig,
+                    dr,
+                    xh_av_flat,
+                    phi_ion_flat,
+                    NumSrc,
+                    sub_mesh_size,
+                    minlogtau,
+                    dlogtau,
+                    NumTau,
+                    src_batch_size, # Determines the CUDA kernel grid size
+                )
         else:
             # Set rates to 0. When using ASORA, this is done internally by the library (directly on the GPU)
             phi_ion = np.zeros((N, N, N), order="F")
@@ -283,7 +425,8 @@ Convergence Criterion (Number of points): {conv_criterion: n}
 
         # Since chemistry (ODE solving) is done on the CPU in Fortran, flattened CUDA arrays need to be reshaped
         if use_gpu:
-            phi_ion = np.reshape(phi_ion_flat, (N, N, N))
+            if not activate_domain_decomposition or local_groups is None:
+                phi_ion = np.reshape(phi_ion_flat, (N, N, N))
         else:
             logger.info(
                 f"Average number of subboxes: {nsubbox / NumSrc:n}, Total photon loss: {photonloss:.3e}"
