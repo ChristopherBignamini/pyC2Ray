@@ -46,6 +46,7 @@ def evolve3D(
     src_flux: FloatArray,
     src_pos: IntArray,
     src_batch_size: int,
+    activate_domain_decomposition: bool = True
     use_gpu: bool,
     max_subbox: int,
     subboxsize: int,
@@ -70,7 +71,6 @@ def evolve3D(
     colh0: float,
     temph0: float,
     abu_c: float,
-    activate_domain_decomposition: bool = True
 ) -> tuple[FloatArray, FloatArray]:
     """Evolves the ionization fraction over one timestep for the whole grid
 
@@ -87,6 +87,10 @@ def evolve3D(
         Array containing the total ionizing flux of each source, normalized by S_star (1e48 by default)
     src_pos : 2D-array of shape (3,numsrc)
         Array containing the 3D grid position of each source, in Fortran indexing (from 1)
+    src_batch_size : int
+        Number of sources to process in each batch
+    activate_domain_decomposition : bool
+        Whether or not compute evolution by using source grouping and domain decomposition.
     use_gpu : bool
         Whether or not to use the GPU-accelerated ASORA library for raytracing.
     max_subbox : int
@@ -126,8 +130,6 @@ def evolve3D(
         Hydrogen ionization energy expressed in K
     abu_c : float
         Carbon abundance
-    activate_domain_decomposition : bool
-        Whether or not compute evolution by using source grouping and domain decomposition.
 
     Returns
     -------
@@ -207,50 +209,50 @@ def evolve3D(
         local_cost = comm.scatter(rank_costs, root=0)
 
         # TODO CB: at the moment, the maximum number of local groups per rank is 1
-        if local_groups > 1:
+        if activate_domain_decomposition and len(local_groups) > 1:
             raise NotImplementedError("Currently, the code only supports a maximum of 1 local group per rank.")
 
         # Sequential section to inspect scatter results rank-by-rank.
-        for r in range(nprocs):
-            comm.Barrier()
-            if rank == r:
-                n_local_groups = len(local_groups) if local_groups is not None else 0
-                n_local_sources = (
-                    sum(len(g.sources) for g in local_groups)
-                    if local_groups is not None
-                    else 0
-                )
-                logger.info(
-                    "Scatter check | rank=%d groups=%d sources=%d",
-                    rank,
-                    n_local_groups,
-                    n_local_sources
-                )
-                # TODO CB: I'm only reporting the number of voxels of the first (of the AMR hierarchy) overlapping patch for each group
-                for i, g in enumerate(local_groups):
-                    logger.info(
-                        "Local group index=%d cost=%.3e center=(%.2f, %.2f, %.2f) center in cells=(%.2f, %.2f, %.2f) radius=%.2f radius in cells=(%.2f) box_min=(%d, %d, %d) box_max=(%d, %d, %d)",
-                        i,
-                        float(local_cost) if local_cost is not None else 0.0,
-                        g.center[0] if local_groups and len(local_groups) > 0 else 0.0,
-                        g.center[1] if local_groups and len(local_groups) > 0 else 0.0,
-                        g.center[2] if local_groups and len(local_groups) > 0 else 0.0,
-                        (g.center[0] / dr) if local_groups and len(local_groups) > 0 else 0.0,
-                        (g.center[1] / dr) if local_groups and len(local_groups) > 0 else 0.0,
-                        (g.center[2] / dr) if local_groups and len(local_groups) > 0 else 0.0,
-                        g.radius if local_groups and len(local_groups) > 0 else 0.0,
-                        (g.radius / dr) if local_groups and len(local_groups) > 0 else 0.0,
-                        g.voxels[0][1][0] if local_groups and len(local_groups) > 0 else 0,
-                        g.voxels[0][1][1] if local_groups and len(local_groups) > 0 else 0,
-                        g.voxels[0][1][2] if local_groups and len(local_groups) > 0 else 0,
-                        g.voxels[0][2][0] if local_groups and len(local_groups) > 0 else 0,
-                        g.voxels[0][2][1] if local_groups and len(local_groups) > 0 else 0,
-                        g.voxels[0][2][2] if local_groups and len(local_groups) > 0 else 0
+        if activate_domain_decomposition:
+            for r in range(nprocs):
+                comm.Barrier()
+                if rank == r:
+                    n_local_groups = len(local_groups) if local_groups is not None else 0
+                    n_local_sources = (
+                        sum(len(g.sources) for g in local_groups)
+                        if local_groups is not None
+                        else 0
                     )
+                    logger.info(
+                        "Scatter check | rank=%d groups=%d sources=%d",
+                        rank,
+                        n_local_groups,
+                        n_local_sources
+                    )
+                    # TODO CB: I'm only reporting the number of voxels of the first (of the AMR hierarchy) overlapping patch for each group
+                    for i, g in enumerate(local_groups):
+                        logger.info(
+                            "Local group index=%d cost=%.3e center=(%.2f, %.2f, %.2f) center in cells=(%.2f, %.2f, %.2f) radius=%.2f radius in cells=(%.2f) box_min=(%d, %d, %d) box_max=(%d, %d, %d)",
+                            i,
+                            float(local_cost) if local_cost is not None else 0.0,
+                            g.center[0] if local_groups and len(local_groups) > 0 else 0.0,
+                            g.center[1] if local_groups and len(local_groups) > 0 else 0.0,
+                            g.center[2] if local_groups and len(local_groups) > 0 else 0.0,
+                            (g.center[0] / dr) if local_groups and len(local_groups) > 0 else 0.0,
+                            (g.center[1] / dr) if local_groups and len(local_groups) > 0 else 0.0,
+                            (g.center[2] / dr) if local_groups and len(local_groups) > 0 else 0.0,
+                            g.radius if local_groups and len(local_groups) > 0 else 0.0,
+                            (g.radius / dr) if local_groups and len(local_groups) > 0 else 0.0,
+                            g.voxels[0][1][0] if local_groups and len(local_groups) > 0 else 0,
+                            g.voxels[0][1][1] if local_groups and len(local_groups) > 0 else 0,
+                            g.voxels[0][1][2] if local_groups and len(local_groups) > 0 else 0,
+                            g.voxels[0][2][0] if local_groups and len(local_groups) > 0 else 0,
+                            g.voxels[0][2][1] if local_groups and len(local_groups) > 0 else 0,
+                            g.voxels[0][2][2] if local_groups and len(local_groups) > 0 else 0
+                        )
 
-        comm.Barrier()
-
-    logger.info("Source groups assigned to ranks.")
+            comm.Barrier()
+            logger.info("Source groups assigned to ranks.")
 
     # When using GPU raytracing, data has to be reshaped & reformatted and copied to the device
     if use_gpu:
@@ -260,9 +262,9 @@ def evolve3D(
         # If domain_decomposition is active we can limit the grid to be copied to the GPU to the one overlapping with the local groups.
         if activate_domain_decomposition and local_groups is not None:
             sub_mesh_size = local_groups[0].get_num_cells_per_side()
-            xh_av_flat = np.ravel(xh_av[local_groups[0].voxels[0][1][0]:local_groups[0].voxels[0][2][0],
-                                        local_groups[0].voxels[0][1][1]:local_groups[0].voxels[0][2][1],
-                                        local_groups[0].voxels[0][1][2]:local_groups[0].voxels[0][2][2]]).astype("float64", copy=True)
+            xh_av_flat = np.ravel(xh[local_groups[0].voxels[0][1][0]:local_groups[0].voxels[0][2][0],
+                                     local_groups[0].voxels[0][1][1]:local_groups[0].voxels[0][2][1],
+                                     local_groups[0].voxels[0][1][2]:local_groups[0].voxels[0][2][2]]).astype("float64", copy=True)
             ndens_flat = np.ravel(ndens[local_groups[0].voxels[0][1][0]:local_groups[0].voxels[0][2][0],
                                         local_groups[0].voxels[0][1][1]:local_groups[0].voxels[0][2][1],
                                         local_groups[0].voxels[0][1][2]:local_groups[0].voxels[0][2][2]]).astype("float64", copy=True)
@@ -351,6 +353,16 @@ Convergence Criterion (Number of points): {conv_criterion: n}
             # Use GPU raytracing
             assert libasora is not None
             if activate_domain_decomposition and local_groups is not None:
+
+                # TODO CB: we can probably avoid this reshape and ravel if we are careful with the indexing in the CUDA kernel, but for now this is simpler to implement.
+                # If this is not first iteration then we need to find subdomain xh_av_flat from the global one received from rank 0 after the broadcast. 
+                # If this is the first iteration, xh_av_flat is already correctly initialized to the subdomain values.
+                if niter > 1:
+                    tmp_xh_av = np.reshape(xh_av_flat, (N, N, N))
+                    xh_av_flat = np.ravel(tmp_xh_av[local_groups[0].voxels[0][1][0]:local_groups[0].voxels[0][2][0],
+                                                    local_groups[0].voxels[0][1][1]:local_groups[0].voxels[0][2][1],
+                                                    local_groups[0].voxels[0][1][2]:local_groups[0].voxels[0][2][2]]).astype("float64", copy=True)
+
                 # TODO CB: avoid call duplication here.
                 libasora.do_all_sources(
                     R_max_LLS,
@@ -504,11 +516,23 @@ Convergence Criterion (Number of points): {conv_criterion: n}
             prev_sum_xh0_int = sum_xh0_int
 
             # Finally, when using GPU, need to reshape x back for the next ASORA call
-            if use_gpu and not converged:
+            if use_gpu and (not converged or activate_domain_decomposition):
                 xh_av_flat = np.ravel(xh_av)
+                logger.info("CHRI iteration %d xh_av_flat and xh_av size on rank 0: %d %d %d %d", n_count - 1, xh_av_flat.size, xh_av.shape[0], xh_av.shape[1], xh_av.shape[2])
 
         if use_mpi:
             # broadcast ionised fraction field
+            if activate_domain_decomposition and use_gpu and rank != 0:
+                # Collective ops require equal buffer sizes on all ranks.
+                xh_av_flat = np.empty(N * N * N, dtype=np.float64)
+            comm.barrier() # make sure all ranks have reached this point before broadcasting
+
+            for r in range(nprocs):
+                comm.barrier()
+                if rank == r:
+                    logger.info(f"Broadcasting updated ionization fraction from rank {rank}...")
+                    logger.info("CHRI xh_av_flat size on rank %d: %d", rank, xh_av_flat.size)
+
             comm.Bcast([xh_av_flat, MPI.DOUBLE], root=0)
             comm.Bcast([xh_intermed, MPI.DOUBLE], root=0)
 
