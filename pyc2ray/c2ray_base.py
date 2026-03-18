@@ -284,6 +284,7 @@ class C2Ray:
             src_flux=src_flux,
             src_pos=src_pos,
             src_batch_size=self.raytracing_params.source_batch_size,
+            activate_domain_decomposition=self.raytracing_params.activate_domain_decomposition,
             use_gpu=self.gpu,
             max_subbox=self.max_subbox,
             subboxsize=self.subboxsize,
@@ -602,6 +603,10 @@ This corresponds to %.3f grid cells.""",
     @property
     def subboxsize(self) -> int:
         return self.raytracing_params.subboxsize
+
+    @property
+    def activate_domain_decomposition(self) -> bool:
+        return self.raytracing_params.activate_domain_decomposition
 
     @property
     def cosmological(self) -> bool:
