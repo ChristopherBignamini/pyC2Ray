@@ -100,6 +100,8 @@ class RaytracingParameters(YmlParameters):
     source_batch_size: int = 1
     # Which fraction of the cells can be left unconverged
     convergence_fraction: float = 1.0e-4
+    # Whether to activate domain decomposition for the raytracing
+    activate_domain_decomposition: bool = True
 
 
 @dataclass
