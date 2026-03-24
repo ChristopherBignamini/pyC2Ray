@@ -46,7 +46,7 @@ def evolve3D(
     src_flux: FloatArray,
     src_pos: IntArray,
     src_batch_size: int,
-    activate_domain_decomposition: bool = True
+    activate_domain_decomposition: bool,
     use_gpu: bool,
     max_subbox: int,
     subboxsize: int,
@@ -188,14 +188,14 @@ def evolve3D(
                 # TODO CB: check radius value, I'm currently reducing it for testing purposes.
                 source_groups = build_groups(
                     sources=[Source(i, pos=(np.array(src_pos[:, i], dtype=float) - 0.5) * dr,
-                                    strength=src_flux[i], radius=0.01*R_max_LLS*dr) for i in range(NumSrc)],
+                                    strength=src_flux[i], radius=R_max_LLS*dr) for i in range(NumSrc)],
                     grid=var_grid,
                     nsrc_max = 4)
                 logger.info(f"Created {len(source_groups)} source groups for domain decomposition.")
             else:
                 source_groups = [Group(sources=[
                     Source(i, pos=(np.array(src_pos[:, i], dtype=float) - 0.5) * dr,
-                           strength=src_flux[i], radius=0.01*R_max_LLS*dr)]) for i in range(NumSrc)]
+                           strength=src_flux[i], radius=R_max_LLS*dr)]) for i in range(NumSrc)]
                 logger.info("Domain decomposition disabled. Each source is treated as its own group.")
             rank_groups, rank_costs = assign_groups_to_ranks(source_groups, nranks=nprocs)
 
