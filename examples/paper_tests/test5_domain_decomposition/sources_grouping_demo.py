@@ -52,48 +52,6 @@ def generate_sources(num_cluster_sources: int = 70, cluster_center: np.ndarray =
 
     return sources
 
-def generate_grid(
-    boxsize: float,
-    coarse_cell_dx: float,
-    refined_cell_dx: float = -1.0):
-    """
-    Generate a grid with optional refined patch.
-    
-    Parameters    
-    ----------
-    boxsize : float
-        Size of the cubic domain in comoving Mpc/h.
-    coarse_cell_dx : float
-        Size of the coarse grid cells.
-    refined_cell_dx : float, optional
-        Size of the refined grid cells. If -1.0, no refined patch is generated.
-
-    Returns
-    -------
-    VariableResolutionGrid
-        A grid object with the specified patches.
-    """
-
-    domain_min = np.array([0.0, 0.0, 0.0])
-    domain_max = np.array([boxsize, boxsize, boxsize])
-
-    patches = [
-        # coarse background
-        (domain_min.copy(), domain_max.copy(), coarse_cell_dx),
-    ]
-
-    if refined_cell_dx > 0.0 and refined_cell_dx < coarse_cell_dx:
-        patches.append(
-            (
-                np.array([0.10, 0.10, 0.10]) * boxsize,
-                np.array([0.35, 0.35, 0.35]) * boxsize,
-                refined_cell_dx,
-            )
-        )
-
-
-    return dd_utils.VariableResolutionGrid(domain_min=domain_min, domain_max=domain_max, patches=patches)
-
 def _box_faces(pmin: np.ndarray, pmax: np.ndarray):
     """
     Return the six faces of a box.
@@ -295,18 +253,15 @@ def main():
     source_strength = 1.0
 
     # Grid structure
-    coarse_cell_N = 256
-    cell_refining_factor = 4.0
-    coarse_cell_dx = boxsize / coarse_cell_N
-    refined_cell_dx = -1.0 #coarse_cell_dx / cell_refining_factor
+    num_cells = 256
+    cell_dx = boxsize / num_cells
 
     # Maximum tracing radius from the Lyman-limit-system
     # mean free path. Same units as the domain: comoving Mpc/h.
     lambda_mfp_mpc_h = 20.0
     r_max_lls = lambda_mfp_mpc_h
 
-    r_max_lls_coarse_cells = lambda_mfp_mpc_h / coarse_cell_dx
-    r_max_lls_refined_cells = lambda_mfp_mpc_h / refined_cell_dx
+    r_max_lls_cells = lambda_mfp_mpc_h / cell_dx
 
     # Create source distribution
     sources = generate_sources(
@@ -320,11 +275,7 @@ def main():
     )
 
     # Create variable-resolution grid
-    grid = generate_grid(
-        boxsize=boxsize,
-        coarse_cell_dx=coarse_cell_dx,
-        refined_cell_dx=refined_cell_dx
-    )
+    grid = dd_utils.Grid(num_cells = num_cells, dx = cell_dx)
 
     # Build groups with a uniform radius constraint based on the LLS mean free path.
     groups = dd_utils.build_groups(
@@ -332,7 +283,7 @@ def main():
         grid=grid,
         r_group_max=1.5 * r_max_lls,
         nsrc_max=12,
-        nvox_max=80000,
+        ncell_max=80000,
         cost_max=500000,
     )
 
@@ -341,21 +292,18 @@ def main():
 
     # Report results and plot. 
     print(f"Toy box size                = {boxsize:.1f} cMpc/h")
-    print(f"Coarse cell size            = {coarse_cell_dx:.3f} cMpc/h")
-    print(f"Refined cluster cell size   = {refined_cell_dx:.3f} cMpc/h")
+    print(f"Cell size                   = {cell_dx:.3f} cMpc/h")
     print(f"Mean free path (LLS)        = {lambda_mfp_mpc_h:.1f} cMpc/h")
-    print(f"R_max_LLS (coarse cells)    = {r_max_lls_coarse_cells:.1f}")
-    print(f"R_max_LLS (refined cells)   = {r_max_lls_refined_cells:.1f}\n")
+    print(f"R_max_LLS (cells)           = {r_max_lls_cells:.1f}\n")
 
     print(f"Total sources: {len(sources)}")
     print(f"Total groups:  {len(groups)}\n")
     print(f"Using a uniform source radius R_max_LLS = {r_max_lls:.2f} cMpc/h\n")
 
     for ig, g in enumerate(groups):
-        # TODO: I'm only reporting the number of voxels of the first overlapping patch
         print(
             f"Group {ig:02d}: nsrc={len(g.sources):2d}, "
-            f"R={g.radius:6.2f}, nvox={g.get_num_voxels()[0]:7d}, cost={g.cost:10.1f}"
+            f"R={g.radius:6.2f}, ncell={g.get_num_cells():7d}, cost={g.cost:10.1f}"
         )
 
     print("\nAssignment to ranks:")
@@ -364,7 +312,7 @@ def main():
         for g in gs:
             print(
                 f"   nsrc={len(g.sources):2d}, R={g.radius:6.2f}, "
-                f"nvox={g.get_num_voxels()[0]:7d}, cost={g.cost:10.1f}"
+                f"ncell={g.get_num_cells():7d}, cost={g.cost:10.1f}"
             )
 
     # plot_grid_and_sources(grid, sources, groups, )
