@@ -260,7 +260,7 @@ def evolve3D(
                 NumSrc = len(local_groups[0].sources)
                 srcpos_flat, normflux_flat = format_sources(
                     # Source position in subdomain already respects ASORA convention for Fortran indexing
-                    src_pos[:, local_groups[0].get_source_ids()] - full_min,
+                    src_pos[:, local_groups[0].get_source_ids()] - full_min[:, None],
                     src_flux[local_groups[0].get_source_ids()]
                 )
                 logger.info(f"...rank={rank:n} has {len(local_groups[0].sources):n} sources in its local group.")
