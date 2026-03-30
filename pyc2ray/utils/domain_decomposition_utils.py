@@ -1,6 +1,5 @@
 import logging
-import math
-from typing import Any, List, Tuple, Optional
+from typing import Any, List, Tuple
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -31,7 +30,16 @@ def log_domain_decomposition_assignments(
 
             for i, g in enumerate(groups):
                 logger.info(
-                    "Local group index=%d cost=%.3e center=(%.2f, %.2f, %.2f) center in cells=(%.2f, %.2f, %.2f) radius=%.2f radius in cells=(%.2f) box_min=(%d, %d, %d) box_max=(%d, %d, %d)",
+                    (
+                        "Local group index=%d cost=%.3e "
+                        "center=(%.2f, %.2f, %.2f) "
+                        "center in cells=(%.2f, %.2f, %.2f) "
+                        "radius=%.2f radius in cells=(%.2f) "
+                        "bounding_box_min=(%d, %d, %d) "
+                        "bounding_box_max=(%d, %d, %d) "
+                        "clipped_bounding_box_min=(%d, %d, %d) "
+                        "clipped_bounding_box_max=(%d, %d, %d)"
+                    ),
                     i,
                     float(local_cost),
                     g.center[0],
@@ -42,12 +50,18 @@ def log_domain_decomposition_assignments(
                     g.center[2] / dr,
                     g.radius,
                     g.radius / dr,
-                    g.cells[0][1][0],
-                    g.cells[0][1][1],
-                    g.cells[0][1][2],
-                    g.cells[0][2][0],
-                    g.cells[0][2][1],
-                    g.cells[0][2][2],
+                    g.cells[0][0],
+                    g.cells[0][1],
+                    g.cells[0][2],
+                    g.cells[1][0],
+                    g.cells[1][1],
+                    g.cells[1][2],
+                    g.cells[2][0],
+                    g.cells[2][1],
+                    g.cells[2][2],
+                    g.cells[3][0],
+                    g.cells[3][1],
+                    g.cells[3][2],
                 )
 
     comm.Barrier()
