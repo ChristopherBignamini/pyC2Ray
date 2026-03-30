@@ -1,55 +1,158 @@
+import logging
 import math
-from typing import List, Tuple, Optional
+from typing import Any, List, Tuple, Optional
 import numpy as np
 
-class VariableResolutionGrid:
-    """Prototype variable-resolution grid model.
+logger = logging.getLogger(__name__)
+
+# TODO CB: consolidate or delete
+def log_domain_decomposition_assignments(
+    comm: Any,
+    rank: int,
+    nprocs: int,
+    local_groups: List[Group] | None,
+    local_cost: float,
+    dr: float,
+) -> None:
+    """Log domain decomposition source group data and distribution."""
+    for r in range(nprocs):
+        comm.Barrier()
+        if rank == r:
+            groups = local_groups if local_groups is not None else []
+            n_local_groups = len(groups)
+            n_local_sources = sum(len(g.sources) for g in groups)
+
+            logger.info(
+                "Scatter check | rank=%d groups=%d sources=%d",
+                rank,
+                n_local_groups,
+                n_local_sources,
+            )
+
+            for i, g in enumerate(groups):
+                logger.info(
+                    "Local group index=%d cost=%.3e center=(%.2f, %.2f, %.2f) center in cells=(%.2f, %.2f, %.2f) radius=%.2f radius in cells=(%.2f) box_min=(%d, %d, %d) box_max=(%d, %d, %d)",
+                    i,
+                    float(local_cost),
+                    g.center[0],
+                    g.center[1],
+                    g.center[2],
+                    g.center[0] / dr,
+                    g.center[1] / dr,
+                    g.center[2] / dr,
+                    g.radius,
+                    g.radius / dr,
+                    g.cells[0][1][0],
+                    g.cells[0][1][1],
+                    g.cells[0][1][2],
+                    g.cells[0][2][0],
+                    g.cells[0][2][1],
+                    g.cells[0][2][2],
+                )
+
+    comm.Barrier()
+    logger.info("Source groups assigned to ranks.")
+
+
+def overlap_volume(a_min, a_max, b_min, b_max) -> float:
+    """Return intersection volume between two axis-aligned boxes.
+
+    Parameters
+    ----------
+    a_min : np.ndarray
+        Minimum corner of box A (shape `(3,)`).
+    a_max : np.ndarray
+        Maximum corner of box A (shape `(3,)`).
+    b_min : np.ndarray
+        Minimum corner of box B (shape `(3,)`).
+    b_max : np.ndarray
+        Maximum corner of box B (shape `(3,)`).
+
+    Returns
+    -------
+    float
+        Intersection volume between the two boxes.
+    """
+    if np.any(a_max <= a_min) or np.any(b_max <= b_min):
+        raise ValueError('Invalid box: max corners must be "greater" than min corner.')
+    overlap_min = np.maximum(a_min, b_min)
+    overlap_max = np.minimum(a_max, b_max)
+    d = np.maximum(0.0, overlap_max - overlap_min)
+    return float(d[0] * d[1] * d[2])
+
+
+class Grid:
+    """ Utility class for grid-related calculations, such as finding overlapping cells for a given box.
+
+    The grid is assumed to have its "origin" at (0, 0, 0), a cubic shape and be axis-aligned. Moreover
+    the grid is represented in physical coordinates, i.e. the cell size is given by `dx`.
 
     Attributes
     ----------
-    domain_min : np.ndarray
-        Minimum domain corner (shape `(3,)`).
-    domain_max : np.ndarray
-        Maximum domain corner (shape `(3,)`).
-    patches : List[Tuple[np.ndarray, np.ndarray, float]]
-        Rectangular subdomains described as `(pmin, pmax, dx)`, where `dx`
-        is the local cell size in that patch.
+    num_cells : int
+        Number of cells in each dimension.
+    dx : float
+        Uniform cell size for the grid.
     """
-    domain_min: np.ndarray
-    domain_max: np.ndarray
-    patches: List[Tuple[np.ndarray, np.ndarray, float]]  # (pmin, pmax, dx)
+    num_cells: int
+    dx: float
 
     def __init__(
         self,
-        domain_min: np.ndarray,
-        domain_max: np.ndarray,
-        patches: List[Tuple[np.ndarray, np.ndarray, float]],
+        num_cells: int,
+        dx: float,
     ) -> None:
-        self.domain_min = np.asarray(domain_min, dtype=float)
-        self.domain_max = np.asarray(domain_max, dtype=float)
-        self.patches = [
-            (np.asarray(pmin, dtype=float), np.asarray(pmax, dtype=float), float(dx))
-            for pmin, pmax, dx in patches
-        ]
 
-    def overlap_volume(self, a_min, a_max, b_min, b_max) -> float:
-        """Return intersection volume between two axis-aligned boxes."""
-        lo = np.maximum(a_min, b_min)
-        hi = np.minimum(a_max, b_max)
-        d = np.maximum(0.0, hi - lo)
-        return float(d[0] * d[1] * d[2])
+        self.num_cells = num_cells
+        self.dx = dx
 
-    def find_voxels_in_bbox(self, bbox_min: np.ndarray, bbox_max: np.ndarray) -> List[Tuple[int, np.ndarray, np.ndarray, int]]:
-        """Estimate voxel count and indexes in a bbox for the list of patches."""
-        indexes = []
-        for i, (pmin, pmax, dx) in enumerate(self.patches):
-            vol = self.overlap_volume(bbox_min, bbox_max, pmin, pmax)
-            if vol > 0.0:
-                # TODO CB: I'm not sure it make sense in cost evaluation: we should maybe only consider
-                # the most refined patch overlapping the bbox. I'm not sure of the volume normalization either.
-                indexes.append((i, np.floor(bbox_min/dx).astype(int), np.ceil(bbox_max/dx).astype(int), np.floor(vol / (dx**3)).astype(int)))
+        if self.num_cells <= 0:
+            raise ValueError("Invalid number of cells: must be a positive integer.")
+        if self.dx <= 0.0:
+            raise ValueError("Invalid cell size: dx must be positive.")
 
-        return indexes
+    def find_cells_in_box(self, box_min: np.ndarray, box_max: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]:
+        """Estimate cell count and corresponding grid indexes in a box.
+        The box is not limited to the grid domain, but only the overlapping part is considered for cell counting
+        since the "external" is not included in pyC2Ray computations.
+
+        Parameters
+        ----------
+        box_min : np.ndarray
+            Minimum corner of the axis-aligned box (shape `(3,)`).
+        box_max : np.ndarray
+            Maximum corner of the axis-aligned box (shape `(3,)`).
+
+        Returns
+        -------
+        Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]
+            Overlapping cell group.
+            The tuple contains (cell_min_indexes, cell_max_indexes, cell_min_indexes_clipped, cell_max_indexes_clipped, effective_volume),
+            where cell indexes are 0-based (beware of discrepancies wrt C2Ray). cell_max_indexes are inclusive.
+        """
+        if np.any(box_max <= box_min):
+            raise ValueError("Invalid box: box_max must be greater than box_min.")
+
+        vol = overlap_volume(box_min, box_max, np.zeros(3), np.array(self.num_cells) * self.dx)
+        if vol > 0.0:
+            # This calculation already accounts for the fact that the box may be partially outside the grid domain
+            min_indexes = np.floor(box_min / self.dx).astype(int)
+            max_indexes = np.ceil(box_max / self.dx).astype(int) - 1
+            # Compute the effective volume contained in the grid domain
+            min_indexes_clipped = np.maximum(min_indexes, 0)
+            max_indexes_clipped = np.minimum(max_indexes, self.num_cells - 1)
+            effective_volume = np.prod((max_indexes_clipped - min_indexes_clipped + 1))*(self.dx ** 3)
+            return (min_indexes, max_indexes, min_indexes_clipped, max_indexes_clipped, effective_volume)
+
+        return (np.zeros(3, dtype=int), np.zeros(3, dtype=int), np.zeros(3, dtype=int), np.zeros(3, dtype=int), 0)
+
+    def get_domain_min(self) -> np.ndarray:
+        """Return the minimum corner of the grid domain."""
+        return np.zeros(3)
+
+    def get_domain_max(self) -> np.ndarray:
+        """Return the maximum corner of the grid domain."""
+        return np.array(self.num_cells) * self.dx
 
 class Source:
     """Represents a single radiation source.
@@ -90,66 +193,67 @@ class Group:
     radius : float
         Radius of the enclosing sphere.
     bbox_min : np.ndarray
-        Minimum corner of the axis-aligned bounding box around the group.
+        Minimum corner of the cubic axis-aligned bounding box around the group.
     bbox_max : np.ndarray
-        Maximum corner of the axis-aligned bounding box around the group.
-    voxels : List[Tuple[int, np.ndarray, np.ndarray, int]]
-        List of overlapping grid patches and their voxel min/max indexes.
+        Maximum corner of the cubic axis-aligned bounding box around the group.
+    cells : Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]
+        Overlapping cell group. The tuple contains (cell_min_indexes, cell_max_indexes, cell_min_indexes_clipped, cell_max_indexes_clipped, effective_volume),
+        where cell indexes are 0-based (beware of discrepancies wrt C2Ray). cell_max_indexes are inclusive.
     cost : float
         Estimated computational cost for this group.
     """
     def __init__(
         self,
-        sources: Optional[List[Source]] = None,
-        center: Optional[np.ndarray] = None,
-        radius: float = 0.0,
-        bbox_min: Optional[np.ndarray] = None,
-        bbox_max: Optional[np.ndarray] = None,
-        voxels: Optional[List[Tuple[int, np.ndarray, np.ndarray, int]]] = None,
-        cost: float = 0.0,
+        sources: List[Source],
+        center: np.ndarray,
+        radius: float,
+        bbox_min: np.ndarray,
+        bbox_max: np.ndarray,
+        cells: Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float],
+        cost: float,
     ) -> None:
-        self.sources = list(sources) if sources is not None else []
-        self.center = center.copy() if center is not None else np.zeros(3)
-        self.radius = radius  # enclosing sphere radius for union of balls
-        self.bbox_min = bbox_min.copy() if bbox_min is not None else np.zeros(3)
-        self.bbox_max = bbox_max.copy() if bbox_max is not None else np.zeros(3)
+        self.sources = list(sources)
+        self.center = center.copy()
+        self.radius = radius
+        self.bbox_min = bbox_min.copy()
+        self.bbox_max = bbox_max.copy()
         self.cost = cost
-        self.voxels = voxels if voxels is not None else []
+        self.cells = cells
 
-    def get_source_ids(self) -> List[Optional[int]]:
+    def get_source_ids(self) -> List[int]:
         """Return the list of source global IDs in this group."""
         return [s.gid for s in self.sources]
 
-    def get_num_voxels(self) -> List[Optional[int]]:
-        """Return the total number of voxels covered by this group."""
-        num_voxels_per_patch = []
-        for voxel in self.voxels:
-            num_voxels_per_patch.append(int(np.prod(voxel[2] - voxel[1])))
-        return num_voxels_per_patch
+    def get_num_cells(self) -> int:
+        """Return the total number of domain (only included) cells covered by this group bounding box."""
+        if self.cells[4] == 0:
+            # Grid volume for this group is zero.
+            return 0
+        else:
+            # cell_max_indexes are inclusive, so we need to add 1 to get the count of cells along each axis.
+            return np.prod((self.cells[3] - self.cells[2]) + 1)
 
     def get_num_cells_per_side(self) -> int:
-        """Return cubic side length (number of cells) for the top/first patch."""
-        if not self.voxels:
+        """Return the number of domain (only included) cells per side for the cubic bounding box."""
+        if self.cells[4] == 0:
+            # Grid volume for this group is zero, so we can consider it as having zero cells per side.
             return 0
+        else:
+            # cell_max_indexes are inclusive, so we need to add 1 to get the count of cells along each axis.
+            return int(self.cells[3][0] - self.cells[2][0] + 1)
 
-        vmin = np.asarray(self.voxels[0][1], dtype=int)
-        vmax = np.asarray(self.voxels[0][2], dtype=int)
-        nside = vmax - vmin
-        if not (nside[0] == nside[1] == nside[2]):
-            raise ValueError("Top patch is not cubic; expected equal cells per side.")
-        return int(nside[0])
+    def get_full_num_cells_per_side(self) -> int:
+        """Return the number of domain cells per side for the full bounding box, including the part outside the grid domain."""
+        if self.cells[4] == 0:
+            # Grid volume for this group is zero, so we can consider it as having zero cells per side.
+            return 0
+        else:
+            # cell_max_indexes are inclusive, so we need to add 1 to get the count of cells along each axis.
+            return int(self.cells[1][0] - self.cells[0][0] + 1)
+ 
 
-    def get_offset(self) -> np.ndarray:
-        """Return the offset to apply to source positions for local processing."""
-        return self.bbox_min[0]
-
-def enclosing_sphere(
-    centers: np.ndarray,
-    radii: np.ndarray,
-    max_iter: int = 200,
-    tol: float = 1e-8,
-) -> Tuple[np.ndarray, float]:
-    """Approximate the minimum enclosing sphere of spheres/balls.
+def find_enclosing_sphere(centers: np.ndarray, radii: np.ndarray, max_iter: int = 200, tol: float = 1e-8) -> Tuple[np.ndarray, float]:
+    """Approximate the minimum enclosing sphere of spheres.
 
     The objective is:
         minimize_c max_i ||c - x_i|| + r_i
@@ -175,9 +279,13 @@ def enclosing_sphere(
     if len(centers) == 1:
         return centers[0].copy(), float(radii[0])
 
+    # Compute the initial guess as the mean of the centers. If all spheres have the same radius,
+    # this is already the optimal solution. Otherwise, we will iteratively move towards the farthest sphere.
     c = centers.mean(axis=0)
 
     for k in range(max_iter):
+
+        # Find the sphere that is farthest from the current center in terms of c2ray distance (center-to-center + radius).
         d = np.linalg.norm(centers - c[None, :], axis=1) + radii
         j = np.argmax(d)
         direction = centers[j] - c
@@ -187,10 +295,11 @@ def enclosing_sphere(
         else:
             direction = np.zeros(3)
 
-        # diminishing step
+        # Move the center towards the farthest sphere by a fraction of the distance.
         eta = 1.0 / (k + 2.0)
-        c_new = c + eta * direction * max(1e-12, np.linalg.norm(centers[j] - c))
+        c_new = c + eta * direction * max(1e-12, norm)
 
+        # Check for convergence. If the center displacement is smaller than the tolerance, we consider it converged.
         if np.linalg.norm(c_new - c) < tol:
             c = c_new
             break
@@ -234,31 +343,35 @@ def morton_like_key(p: np.ndarray, domain_min: np.ndarray, domain_max: np.ndarra
 
     return split_by_3(grid[0]) | (split_by_3(grid[1]) << 1) | (split_by_3(grid[2]) << 2)
 
-def evaluate_group(group_sources: List[Source], grid: VariableResolutionGrid) -> Group:
+
+def evaluate_group(group_sources: List[Source], grid: Grid) -> Group:
     """
-    Build a `Group` and compute its geometric and cost properties.
+    Build a group of sources and compute its geometric and cost properties.
 
     Parameters
     ----------
     group_sources : List[Source]
         Sources that belong to this group.
-    grid : VariableResolutionGrid
-        Grid used to estimate local voxel counts.
+    grid : Grid
+        Grid used to estimate local cell counts.
 
     Returns
     -------
-    Group     Group object with computed center, radius, bounding box, local voxel count, and cost.
+    Group     Group object with computed center, radius, bounding box, local cell count, and cost.
     """
     centers = np.array([s.pos for s in group_sources], dtype=float)
     radii = np.array([s.radius for s in group_sources], dtype=float)
 
-    c, R = enclosing_sphere(centers, radii)
-    bbox_min = np.maximum(c - R, grid.domain_min)
-    bbox_max = np.minimum(c + R, grid.domain_max)
-    voxels = grid.find_voxels_in_bbox(bbox_min, bbox_max) # A cubic box around the group center with side length 2R, clipped to the domain bounds.
+    # Find group enclosing sphere and bounding box. The enclosing sphere is used for the radius constraint,
+    # while the bounding box is used to estimate the local cell count for cost evaluation.
+    c, R = find_enclosing_sphere(centers, radii)
+    bbox_min = c - R
+    bbox_max = c + R
+    cells = grid.find_cells_in_box(bbox_min, bbox_max)
 
-    # simple cost model: number of sources times local voxel count
-    cost = len(group_sources) * voxels[0][3]  # using the volume-based voxel count from the most refined patch
+    # Basic cost evaluation: number of sources times local cell count
+    # TODO CB: this is a very rough estimate. A more accurate cost model could be implemented.
+    cost = len(group_sources) * cells[4]
 
     return Group(
         sources=list(group_sources),
@@ -266,18 +379,18 @@ def evaluate_group(group_sources: List[Source], grid: VariableResolutionGrid) ->
         radius=R,
         bbox_min=bbox_min,
         bbox_max=bbox_max,
-        voxels=voxels,
+        cells=cells,
         cost=cost,
     )
 
 # TODO CB: this can be generalized with different grouping strategies, e.g. space-filling curve grouping, clustering-based grouping, etc...
-# Thius funciton could also be interfaced to external domain decomposition libraries or tools such as Cornerstone.
+# This function could also be interfaced to external domain decomposition libraries or tools such as Cornerstone.
 def build_groups(
     sources: List[Source],
-    grid: VariableResolutionGrid,
+    grid: Grid,
     r_group_max: float = -1.0,
     nsrc_max: int = 12,
-    nvox_max: int = 80000,
+    ncell_max: int = 80000,
     cost_max: float = 500000
 ) -> List[Group]:
     """Grouping of sources in Morton-like spatial order.
@@ -289,14 +402,14 @@ def build_groups(
     ----------
     sources : List[Source]
         List of sources to group.
-    grid : VariableResolutionGrid
-        Grid used to estimate local voxel counts for groups.
+    grid : Grid
+        Grid used to estimate local cell counts for groups.
     r_group_max : float
         Maximum allowed group radius (enclosing sphere of source spheres).
     nsrc_max : int
         Maximum allowed number of sources in a group.
-    nvox_max : int
-        Maximum allowed number of local voxels covered by the group bounding box.
+    ncell_max : int
+        Maximum allowed number of local cells covered by the group bounding box.
     cost_max : float
         Maximum allowed computational cost for the group.
 
@@ -308,27 +421,26 @@ def build_groups(
     if not sources:
         return []
 
-    # spatial ordering
-    dmin, dmax = grid.domain_min, grid.domain_max
-    ordered = sorted(sources, key=lambda s: morton_like_key(s.pos, dmin, dmax))
+    # Spatial ordering (here we are using the physical source position)
+    ordered = sorted(sources, key=lambda s: morton_like_key(s.pos, grid.get_domain_min(), grid.get_domain_max()))
 
     groups: List[Group] = []
     current: List[Source] = []
 
     def valid(g: Group) -> bool:
-        # TODO CB: I'm only reporting the number of voxels of the first overlapping patch.
-        print(f"Evaluating group with {len(g.sources)} sources, radius {g.radius:.2f}, nvox {g.get_num_voxels()[0]}, cost {g.cost:.2f}")
+        print(f"Evaluating group with {len(g.sources)} sources, radius {g.radius:.2f}, ncell {g.get_num_cells()}, cost {g.cost:.2f}")
+        # TODO CB: for debugging only, find the correct validity condition.
         if r_group_max > 0.0:
             return (
                 g.radius <= r_group_max
                 and len(g.sources) <= nsrc_max
-                # and g.nvox_local <= nvox_max
+                # and g.ncell_local <= ncell_max
                 # and g.cost <= cost_max
             )
         else:
             return (
                 len(g.sources) <= nsrc_max
-                # and g.nvox_local <= nvox_max
+                # and g.ncell_local <= ncell_max
                 # and g.cost <= cost_max
             )
 
@@ -364,6 +476,8 @@ def assign_groups_to_ranks(groups: List[Group], nranks: int):
         Number of ranks to distribute groups across.
 
     Returns
+    -------
+
     Tuple[List[List[Group]], List[float]]
         A tuple of (rank_groups, rank_costs), where rank_groups is a list of lists of groups assigned to each rank,
         and rank_costs is the total cost for each rank. 
@@ -371,6 +485,7 @@ def assign_groups_to_ranks(groups: List[Group], nranks: int):
     rank_groups = [[] for _ in range(nranks)]
     rank_costs = [0.0 for _ in range(nranks)]
 
+    # TODO CB: this is a simple assignment. More sophisticated algorithms could be used for better load balancing
     for g in sorted(groups, key=lambda x: x.cost, reverse=True):
         r = int(np.argmin(rank_costs))
         rank_groups[r].append(g)
