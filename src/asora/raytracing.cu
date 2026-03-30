@@ -107,6 +107,17 @@ namespace {
         const auto q_off = cells_to_shell(q - 1);
         double nHI = densities.get(index);
 
+        // Skip padded cells: since we set ndens and xHII to -1 for out-of-domain cells,
+        // the get() function will return a negative value for nHI,
+        // which we can use to identify and skip these cells.
+        // TODO CB: performance enhancement note: what if we pass an additional parameter
+        // to update_photo_rates to be set to 1.0 or 0.0 for in-domain vs out-of-domain cells,
+        // respectively, and then we can skip the branching here and just multiply the photoionization
+        // rate by this parameter in update_photo_rates?
+        // TODO: evaluate the possibility of using a bitmask or similar approach to mark in-domain vs out-of-domain cells,
+        // which could be more efficient than using a special value in the density array.
+        if (nHI < 0) return;
+
         // Compute photoionization rates from column density.
         update_photo_rates(
             data_HI, q_off + s, index, coldens_in, nHI, path, strength, vol_ph,
@@ -242,6 +253,9 @@ namespace asora {
         if (threadIdx.x == 0) {
             const auto index = ravel_index(i0, j0, k0, m1);
             auto nHI = densities.get(index);
+            // TODO CB: In principle, since we set ndens and xHII to -1 for out-of-domain cells, we could
+            // skip the photoionization calculation for the source cell if it is out of the domain
+            // by checking if nHI < 0. However, by design, the source should always be within the domain.
             update_photo_rates(
                 data_HI, 0, index, 0.0, nHI, 0.5 * dr, strength, dr * dr * dr,
                 ion_tables, logtau
