@@ -184,7 +184,7 @@ def evolve3D(
                 sources=[Source(i, pos=(np.array(src_pos[:, i], dtype=float) - 0.5) * dr,
                                 strength=src_flux[i], radius=R_max_LLS*dr) for i in range(NumSrc)],
                 grid=Grid(num_cells=N, dx=dr),
-                nsrc_max = 4)
+                nsrc_max = 1)
             logger.info(f"Created {len(source_groups)} source groups for domain decomposition.")
             ranks_groups, ranks_costs = assign_groups_to_ranks(source_groups, nranks=nprocs)
 
@@ -340,7 +340,7 @@ Convergence Criterion (Number of points): {conv_criterion: n}
                 # If this is the first iteration, xh_av_flat is already correctly initialized to the subdomain values.
                 if niter > 1:
                     tmp_xh_av = np.reshape(xh_av_flat, (N, N, N))
-                    xh_local.fill(-1.0)
+                    xh_local = np.empty((sub_mesh_size, sub_mesh_size, sub_mesh_size), dtype=np.float64)
                     xh_local[
                         local_offset[0]:local_offset[0] + clipped_shape[0],
                         local_offset[1]:local_offset[1] + clipped_shape[1],
@@ -419,6 +419,10 @@ Convergence Criterion (Number of points): {conv_criterion: n}
 
         # Since chemistry (ODE solving) is done on the CPU in Fortran, flattened CUDA arrays need to be reshaped
         if use_gpu:
+            if is_domain_decomposition_active:
+                # TODO CB: find a cleaner way to avoid this fill: the DD code doesn't use
+                # phi_ion_flat directly so this clean up step is unclear (but necessary)
+                phi_ion_flat.fill(0.0) # make sure to reset the global phi_ion array before copying the subdomain result into it, since we will do a sum reduction across ranks later
             phi_ion = np.reshape(phi_ion_flat, (N, N, N))
         else:
             logger.info(
@@ -499,7 +503,6 @@ Convergence Criterion (Number of points): {conv_criterion: n}
                 f"Number of non-converged points: {conv_flag} of {NumCells} ({conv_flag / NumCells * 100: .3f} % ), "
                 f"Relative change in ionfrac: {rel_change_xh1: .2e}",
             )
-
             converged = (conv_flag < conv_criterion) or (
                 (rel_change_xh1 < convergence_fraction)
                 and (rel_change_xh0 < convergence_fraction)
@@ -522,10 +525,10 @@ Convergence Criterion (Number of points): {conv_criterion: n}
             if is_domain_decomposition_active and rank != 0:
                 # Collective ops require equal buffer sizes on all ranks.
                 xh_av_flat = np.empty(N * N * N, dtype=np.float64)
-            comm.barrier() # make sure all ranks have reached this point before broadcasting
+            comm.Barrier() # make sure all ranks have reached this point before broadcasting
 
             for r in range(nprocs):
-                comm.barrier()
+                comm.Barrier()
                 if rank == r:
                     logger.info(f"Broadcasting updated ionization fraction from rank {rank}...")
                     logger.info("CHRI xh_av_flat size on rank %d: %d", rank, xh_av_flat.size)
