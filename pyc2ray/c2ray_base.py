@@ -116,7 +116,6 @@ PARAMETERS_MAP: dict[str, tuple[str, ParameterClass]] = {
 
 
 class C2Ray:
-
     abundance_params: AbundancesParameters
     blackbody_params: BlackBodyParameters
     cgs_params: CGSParameters
