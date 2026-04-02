@@ -156,18 +156,6 @@ class C2Ray:
         self.xh: FloatArray
         self.clumping_factor: FloatArray
 
-        # Initialize output and logger. Waits for all ranks to reach this point.
-        self._output_init()
-
-        # Initialize Simulation
-        self._grid_init()
-        self._cosmology_init()
-        self._redshift_init()
-        self._material_init()
-        self._sources_init()
-        self._radiation_init()
-        self._sinks_init()
-
         if self.mpi and MPI.COMM_WORLD.Get_size() <= 1:
             logger.warning(
                 "Requested to enable MPI but there is only one process available. "
@@ -175,7 +163,7 @@ class C2Ray:
             )
             self.grid_params.mpi = False
 
-        # MPI setup
+        # MPI setup needs to happen before output initialization because _output_init uses self.rank.
         if self.mpi:
             self.rank = MPI.COMM_WORLD.Get_rank()
             self.nprocs = MPI.COMM_WORLD.Get_size()
@@ -207,7 +195,22 @@ class C2Ray:
             #     "\ttot gpu job: %s\n\ttot gpu on node: %d",
             #     node_name, task_id, local_task_id, gpu_ids, tot_gpus, nr_gpus,
             # )
-            # Print maximum shell size for info, based on LLS (qmax is s.t. Rmax fits inside of it)
+
+
+        # Initialize output and logger. Waits for all ranks to reach this point.
+        self._output_init()
+
+        # Initialize Simulation
+        self._grid_init()
+        self._cosmology_init()
+        self._redshift_init()
+        self._material_init()
+        self._sources_init()
+        self._radiation_init()
+        self._sinks_init()
+
+        # Log Raytracing mode and MPI info
+        if self.gpu:
             q_max = np.ceil(np.sqrt(3) * min(self.R_max_LLS, np.sqrt(3) * self.N / 2))
             logger.info(f"Using ASORA Raytracing (q_max = {q_max})")
         else:
