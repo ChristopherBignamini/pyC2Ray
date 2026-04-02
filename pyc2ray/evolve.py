@@ -52,7 +52,6 @@ def evolve3D(
     subboxsize: int,
     loss_fraction: float,
     use_mpi: bool,
-    comm: MPI.Intracomm,
     rank: int,
     nprocs: int,
     temp: FloatArray,
@@ -189,15 +188,15 @@ def evolve3D(
             ranks_groups, ranks_costs = assign_groups_to_ranks(source_groups, nranks=nprocs)
 
         # Broadcast source groups to other ranks
-        local_groups = comm.scatter(ranks_groups, root=0)
-        local_cost = comm.scatter(ranks_costs, root=0)
+        local_groups = MPI.COMM_WORLD.scatter(ranks_groups, root=0)
+        local_cost = MPI.COMM_WORLD.scatter(ranks_costs, root=0)
 
         # TODO CB: at the moment, the number of local groups per rank must be 1
         if len(local_groups) != 1:
             raise NotImplementedError("Currently, the code only supports 1 local group per rank.")
 
         # Rank-by-rank inspection of scatter results.
-        log_domain_decomposition_assignments(comm=comm, rank=rank, nprocs=nprocs, local_groups=local_groups, local_cost=local_cost, dr=dr)
+        log_domain_decomposition_assignments(comm=MPI.COMM_WORLD, rank=rank, nprocs=nprocs, local_groups=local_groups, local_cost=local_cost, dr=dr)
 
     # When using GPU raytracing, data has to be reshaped & reformatted and copied to the device
     if use_gpu:
@@ -310,14 +309,15 @@ def evolve3D(
     # Start Evolve step, Iterate until convergence in <x> and <y>
     # -----------------------------------------------------------
     if rank == 0:
-        logger.info(f"""Calling evolve3D...
+        n_count = 0
+
+    logger.info(f"""Calling evolve3D...
 dr [Mpc]: {dr / 3.086e24:.3e}
 dt [years]: {dt / 3.15576e07:.3e}
 Running on {NumSrc:n} source(s), total normalized ionizing flux: {src_flux.sum():.2e}
 Mean density (cgs): {ndens.mean():.3e}, Mean ionized fraction: {xh.mean():.3e}
 Convergence Criterion (Number of points): {conv_criterion: n}
 """)
-        n_count = 0
 
     while not converged:
         niter += 1
@@ -447,14 +447,16 @@ Convergence Criterion (Number of points): {conv_criterion: n}
                     local_offset[2]:local_offset[2] + clipped_shape[2],
                 ]
 
-            comm.Barrier() # make sure all ranks have finished writing to phi_ion before reduction
+            MPI.COMM_WORLD.Barrier() # make sure all ranks have finished writing to phi_ion before reduction
 
             # Collect results from the different MPI processors
             if rank == 0:
-                comm.Reduce(MPI.IN_PLACE, [phi_ion, MPI.DOUBLE], op=MPI.SUM, root=0)
+                MPI.COMM_WORLD.Reduce(
+                    MPI.IN_PLACE, [phi_ion, MPI.DOUBLE], op=MPI.SUM, root=0
+                )
             else:
-                comm.Reduce([phi_ion, MPI.DOUBLE], None, op=MPI.SUM, root=0)
-            comm.Bcast([phi_ion, MPI.DOUBLE], root=0)
+                MPI.COMM_WORLD.Reduce([phi_ion, MPI.DOUBLE], None, op=MPI.SUM, root=0)
+            MPI.COMM_WORLD.Bcast([phi_ion, MPI.DOUBLE], root=0)
 
         if rank == 0:
             # ---------------------
@@ -480,8 +482,12 @@ Convergence Criterion (Number of points): {conv_criterion: n}
                 abu_c,
             )
 
-            # TODO: the line blow is the same function but completely in python (much slower then the fortran version, due to a lot of loops)
-            # xh_intermed, xh_av, conv_flag = global_pass(dt, ndens, temp, xh, xh_av, xh_intermed, phi_ion, clump, bh00, albpow, colh0, temph0, abu_c)
+            # TODO: the line below is the same function but completely in python
+            # (much slower then the fortran version, due to a lot of loops)
+            # xh_intermed, xh_av, conv_flag = global_pass(
+            #     dt, ndens, temp, xh, xh_av, xh_intermed, phi_ion,
+            #     clump, bh00, albpow, colh0, temph0, abu_c,
+            # )
 
             logger.info(f"  took {(time.time() - tch0): .1f} s.")
 
@@ -528,28 +534,26 @@ Convergence Criterion (Number of points): {conv_criterion: n}
             if is_domain_decomposition_active and rank != 0:
                 # Collective ops require equal buffer sizes on all ranks.
                 xh_av_flat = np.empty(N * N * N, dtype=np.float64)
-            comm.Barrier() # make sure all ranks have reached this point before broadcasting
+            MPI.COMM_WORLD.Barrier() # make sure all ranks have reached this point before broadcasting
 
             for r in range(nprocs):
-                comm.Barrier()
+                MPI.COMM_WORLD.Barrier()
                 if rank == r:
                     logger.info(f"Broadcasting updated ionization fraction from rank {rank}...")
                     logger.info("CHRI xh_av_flat size on rank %d: %d", rank, xh_av_flat.size)
 
-            comm.Bcast([xh_av_flat, MPI.DOUBLE], root=0)
-            comm.Bcast([xh_intermed, MPI.DOUBLE], root=0)
+            MPI.COMM_WORLD.Bcast([xh_av_flat, MPI.DOUBLE], root=0)
+            MPI.COMM_WORLD.Bcast([xh_intermed, MPI.DOUBLE], root=0)
 
             # convert the bool variable to bit
             # converged_array = array.array("i", [converged])
             converged_array = array.array("i", [int(converged)])
 
             # braodcast convergence to the other ranks
-            comm.Bcast(converged_array, root=0)
+            MPI.COMM_WORLD.Bcast(converged_array, root=0)
             if rank != 0:
                 converged = bool(converged_array[0])
 
-        else:
-            pass
     if rank == 0:
         # When converged, return the updated ionization fractions at the end of the timestep
         logger.info(
@@ -559,6 +563,6 @@ Convergence Criterion (Number of points): {conv_criterion: n}
 
     if use_mpi:
         # braodcast final result
-        comm.Bcast([xh_new, MPI.DOUBLE], root=0)
+        MPI.COMM_WORLD.Bcast([xh_new, MPI.DOUBLE], root=0)
 
     return xh_new, phi_ion
