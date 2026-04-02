@@ -301,7 +301,7 @@ class C2Ray:
             photo_thick_table=self.photo_thick_table,
             minlogtau=self.minlogtau,
             dlogtau=self.dlogtau,
-            R_max_LLS=self.R_max_LLS,
+            R_max_LLS=self.R_max_LLS*0.01, #TODO CB: for testing only
             convergence_fraction=self.convergence_fraction,
             sig=self.sig,
             bh00=self.bh00,
@@ -371,7 +371,6 @@ This corresponds to %.3f grid cells.""",
                 self.R_max_LLS * self.boxsize / self.N,
                 self.R_max_LLS,
             )
-        self.R_max_LLS *= 0.01 #TODO CB: for testing only
 
     def write_output(self, z: float, ext: str = ".dat") -> None:
         """Write ionization fraction & ionization rates as C2Ray binary files
