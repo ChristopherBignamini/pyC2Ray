@@ -156,6 +156,22 @@ class C2Ray:
         self.xh: FloatArray
         self.clumping_factor: FloatArray
 
+        # MPI setup must happen before output initialization, because _output_init
+        # accesses self.rank and may synchronize with an MPI barrier.
+        if self.mpi and MPI.COMM_WORLD.Get_size() <= 1:
+            logger.warning(
+                "Requested to enable MPI but there is only one process available. "
+                "Try to run this application with a higher number of processes. Disabling MPI."
+            )
+            self.grid_params.mpi = False
+
+        if self.mpi:
+            self.rank = MPI.COMM_WORLD.Get_rank()
+            self.nprocs = MPI.COMM_WORLD.Get_size()
+        else:
+            self.rank = 0
+            self.nprocs = 1
+
         # Initialize output and logger. Waits for all ranks to reach this point.
         self._output_init()
 
@@ -167,21 +183,6 @@ class C2Ray:
         self._sources_init()
         self._radiation_init()
         self._sinks_init()
-
-        if self.mpi and MPI.COMM_WORLD.Get_size() <= 1:
-            logger.warning(
-                "Requested to enable MPI but there is only one process available. "
-                "Try to run this application with a higher number of processes. Disabling MPI."
-            )
-            self.grid_params.mpi = False
-
-        # MPI setup
-        if self.mpi:
-            self.rank = MPI.COMM_WORLD.Get_rank()
-            self.nprocs = MPI.COMM_WORLD.Get_size()
-        else:
-            self.rank = 0
-            self.nprocs = 1
 
         # Set Raytracing mode
         if self.gpu:
