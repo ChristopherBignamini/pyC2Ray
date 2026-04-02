@@ -171,19 +171,7 @@ class C2Ray:
             self.rank = 0
             self.nprocs = 1
 
-        # Initialize output and logger. Waits for all ranks to reach this point.
-        self._output_init()
-
-        # Initialize Simulation
-        self._grid_init()
-        self._cosmology_init()
-        self._redshift_init()
-        self._material_init()
-        self._sources_init()
-        self._radiation_init()
-        self._sinks_init()
-
-        # Set Raytracing mode
+        # Initialize device if GPU raytracing is enabled.
         if self.gpu:
             # node_name = os.getenv('SLURMD_NODENAME', default='Unknown Node.')
             # task_id = int(os.getenv('SLURM_PROCID', default='Unknown Task ID.'))
@@ -207,6 +195,21 @@ class C2Ray:
             #     "\ttot gpu job: %s\n\ttot gpu on node: %d",
             #     node_name, task_id, local_task_id, gpu_ids, tot_gpus, nr_gpus,
             # )
+
+        # Initialize output and logger. Waits for all ranks to reach this point.
+        self._output_init()
+
+        # Initialize Simulation
+        self._grid_init()
+        self._cosmology_init()
+        self._redshift_init()
+        self._material_init()
+        self._sources_init()
+        self._radiation_init()
+        self._sinks_init()
+
+        # Log Raytracing mode.
+        if self.gpu:
             # Print maximum shell size for info, based on LLS (qmax is s.t. Rmax fits inside of it)
             q_max = np.ceil(np.sqrt(3) * min(self.R_max_LLS, np.sqrt(3) * self.N / 2))
             logger.info(f"Using ASORA Raytracing (q_max = {q_max})")
