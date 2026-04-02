@@ -223,7 +223,9 @@ def evolve3D(
             # Create padded local grids.
             xh_local = np.empty((sub_mesh_size, sub_mesh_size, sub_mesh_size), dtype=np.float64)
             ndens_local = np.empty((sub_mesh_size, sub_mesh_size, sub_mesh_size), dtype=np.float64)
-            # Use -1 as a flag value for out-of-domain cells, which will be ignored in the ASORA raytracing kernel. This is necessary since ASORA requires a rectangular grid, so we need to include out-of-domain cells in the subdomain when the local group is close to the edge of the global grid.
+            # Use -1 as a flag value for out-of-domain cells, which will be ignored in the ASORA raytracing kernel.
+            # This is necessary since ASORA requires a rectangular grid, so we need to include out-of-domain cells
+            # in the subdomain when the local group is close to the edge of the global grid.
             xh_local.fill(-1.0)
             ndens_local.fill(-1.0)
 
@@ -250,6 +252,7 @@ def evolve3D(
 
             xh_av_flat = np.ravel(xh_local).astype("float64", copy=True)
             ndens_flat = np.ravel(ndens_local).astype("float64", copy=True)
+
         else:
             # Format input data for the CUDA extension module (flat arrays, C-types,etc)
             xh_av_flat = np.ravel(xh).astype("float64", copy=True)
