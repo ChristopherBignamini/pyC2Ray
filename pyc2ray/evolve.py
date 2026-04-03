@@ -187,6 +187,13 @@ def evolve3D(
             logger.info(f"Created {len(source_groups)} source groups for domain decomposition.")
             ranks_groups, ranks_costs = assign_groups_to_ranks(source_groups, nranks=nprocs)
 
+            # Rank-0 inspection of assignment results before scatter.
+            log_domain_decomposition_assignments(
+                ranks_groups=ranks_groups,
+                ranks_costs=ranks_costs,
+                dr=dr,
+            )
+
         # Broadcast source groups to other ranks
         local_groups = MPI.COMM_WORLD.scatter(ranks_groups, root=0)
         local_cost = MPI.COMM_WORLD.scatter(ranks_costs, root=0)
@@ -194,9 +201,6 @@ def evolve3D(
         # TODO CB: at the moment, the number of local groups per rank must be 1
         if len(local_groups) != 1:
             raise NotImplementedError("Currently, the code only supports 1 local group per rank.")
-
-        # Rank-by-rank inspection of scatter results.
-        log_domain_decomposition_assignments(comm=MPI.COMM_WORLD, rank=rank, nprocs=nprocs, local_groups=local_groups, local_cost=local_cost, dr=dr)
 
     # When using GPU raytracing, data has to be reshaped & reformatted and copied to the device
     if use_gpu:
