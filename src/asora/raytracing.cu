@@ -69,7 +69,7 @@ namespace {
         const photo_tables &ion_tables, const linspace<double> &logtau
     ) {
         auto &&[di, dj, dk] = linthrd2cart(q, s);
-        // TODO CB: clarify this part.
+
         // Since the grid is periodic, we limit the maximum size of the raytraced
         // region to a cube as large as the mesh around the source. See line 93 of
         // evolve_source in C2Ray, this size will depend on if the mesh is even or
@@ -79,10 +79,12 @@ namespace {
         // which means most ~N cells away from the source.
         int ll = -m1 / 2;
         int lr = m1 % 2 - 1 - ll;
+        // TODO CB: to be verified wrt submesh size
         if ((di < ll) || (di > lr) || (dj < ll) || (dj > lr) || (dk < ll) || (dk > lr))
             return;
 
 #if !defined(PERIODIC)
+        // TODO CB: to be verified wrt submesh size
         // When not in periodic mode, only treat cell if its in the grid
         if (!in_box(i0 + di, j0 + dj, k0 + dk, m1)) return;
 #endif
@@ -116,7 +118,8 @@ namespace {
         // rate by this parameter in update_photo_rates?
         // TODO: evaluate the possibility of using a bitmask or similar approach to mark in-domain vs out-of-domain cells,
         // which could be more efficient than using a special value in the density array.
-        if (nHI < 0) return;
+        // TODO CB: this is probably not needed anymore
+        // if (nHI < 0) return;
 
         // Compute photoionization rates from column density.
         update_photo_rates(
