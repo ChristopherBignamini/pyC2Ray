@@ -74,6 +74,75 @@ def find_enclosing_sphere(
     return c, float(R)
 
 
+def find_enclosing_sphere_new(
+    centers: np.ndarray, radii: np.ndarray, max_iter: int = 200, tol: float = 1e-8
+) -> Tuple[np.ndarray, float]:
+    """Approximate the minimum enclosing sphere of spheres.
+
+    The objective is:
+        minimize_c max_i ||c - x_i|| + r_i
+
+    Parameters
+    ----------
+    centers : Sphere centers, shape `(N, 3)`.
+    radii : Sphere radii, shape `(N,)`.
+    max_iter : Maximum number of fixed-point iterations.
+    tol : Convergence tolerance on center displacement.
+
+    Returns
+    -------
+    Estimated enclosing sphere center and radius.
+    """
+    if len(centers) == 0:
+        return np.zeros(3), 0.0
+    if len(centers) == 1:
+        return centers[0].copy(), float(radii[0])
+
+    # Compute the initial guess as the mean of the centers. If all spheres have the same radius,
+    # this is already the optimal solution. Otherwise, we will iteratively move towards the farthest sphere.
+    c = centers.mean(axis=0)
+    tol2 = tol * tol
+    n = centers.shape[0]
+    all_radii_equal = bool(np.all(radii == radii[0]))
+    r0 = float(radii[0])
+    delta = np.empty((n, 3), dtype=float)
+    dist2 = np.empty(n, dtype=float)
+    d = np.empty(n, dtype=float)
+
+    for k in range(max_iter):
+        # Find the sphere that is farthest from the current center in terms of c2ray distance (center-to-center + radius).
+        np.subtract(centers, c[None, :], out=delta)
+        np.einsum("ij,ij->i", delta, delta, out=dist2)
+        # TODO: this check could be moved outside the loop but we need to avoid code duplication.
+        if all_radii_equal:
+            j = int(np.argmax(dist2))
+        else:
+            np.sqrt(dist2, out=d)
+            d += radii
+            j = int(np.argmax(d))
+
+        # Move the center towards the farthest sphere by a fraction of the distance.
+        eta = 1.0 / (k + 2.0)
+        step = eta * delta[j]
+        c_new = c + step
+
+        # Check for convergence. If the center displacement is smaller than the tolerance, we consider it converged.
+        if np.dot(step, step) < tol2:
+            c = c_new
+            break
+        c = c_new
+
+    np.subtract(centers, c[None, :], out=delta)
+    np.einsum("ij,ij->i", delta, delta, out=dist2)
+
+    if all_radii_equal:
+        R = np.sqrt(np.max(dist2)) + r0
+    else:
+        np.sqrt(dist2, out=d)
+        d += radii
+        R = np.max(d)
+    return c, float(R)
+
 def evaluate_sphere_intersection(
     center_a: np.ndarray, radius_a: float, center_b: np.ndarray, radius_b: float
 ) -> bool:
