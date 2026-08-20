@@ -63,7 +63,7 @@ def find_enclosing_sphere(
 
 def find_enclosing_sphere_new(
     centers: np.ndarray, radii: np.ndarray, max_iter: int = 200, tol: float = 1e-8
-) -> Tuple[np.ndarray, float]:
+) -> tuple[np.ndarray, float]:
     """Approximate the minimum enclosing sphere of spheres.
 
     The objective is:
