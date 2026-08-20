@@ -28,6 +28,7 @@ class Comm(Protocol):
     def Get_rank(self) -> int: ...
     def Get_size(self) -> int: ...
     def scatter(self, data: object, root: int = 0) -> object: ...
+    def gather(self, data: object, root: int = 0) -> object: ...
 
 
 # TODO: split the functionalities of this class between a Subdomain class,
@@ -97,6 +98,37 @@ class Subdomain:
         if grouping_algorithm == "morton":
             return MortonSourceGrouping().build_groups(
                 sources, global_grid, grouping_params, cost_model
+            )
+        else:
+            raise NotImplementedError(
+                f"Grouping algorithm {grouping_algorithm} not implemented yet."
+            )
+
+    def _build_groups_parallel(
+        self,
+        global_grid: Grid,
+        sources: List[Source],
+        cost_model: CostModel,
+        grouping_algorithm: str = "morton",
+        grouping_params: GroupingParams = MortonGroupingParams(),
+    ) -> List[SourceGroup] | None:
+        """Build the groups of sources to be assigned to the ranks.
+
+        Parameters
+        ----------
+        global_grid : The full grid of the simulation.
+        sources : The full list of sources in the simulation.
+        cost_model : The cost model to use for the evaluation of the cost of processing a group of sources.
+        grouping_algorithm : The algorithm to use for source grouping/domain decomposition.
+        grouping_params : The parameters for the source grouping/domain decomposition algorithm.
+
+        Returns
+        -------
+        The list of source groups on rank 0, and None on all other ranks.
+        """
+        if grouping_algorithm == "morton":
+            return MortonSourceGrouping().build_groups_parallel(
+                self.comm, sources, global_grid, grouping_params, cost_model
             )
         else:
             raise NotImplementedError(
@@ -208,6 +240,76 @@ class Subdomain:
             if self.source_groups is not None
             else 0.0
         )
+
+    def run_decomposition_parallel(
+        self,
+        global_grid: Grid,
+        sources: List[Source],
+        cost_model: CostModel,
+        grouping_algorithm: str = "morton",
+        grouping_params: GroupingParams = MortonGroupingParams(),
+    ) -> None:
+        """Run the domain decomposition, which consists in building the groups
+        of sources and the corresponding grid subvolumes that belong together,
+        and assigning them to the ranks.
+
+        Parameters
+        ----------
+        global_grid : The full grid of the simulation.
+        sources : The full list of sources in the simulation.
+        cost_model : The cost model to use for the evaluation of the cost of processing a group of sources.
+        grouping_algorithm : The algorithm to use for source grouping/domain decomposition.
+        grouping_params : The parameters for the source grouping/domain decomposition algorithm.
+        """
+        self.global_grid = global_grid
+
+        # Build the groups of sources to be assigned to the ranks
+        groups = self._build_groups_parallel(
+            global_grid,
+            sources,
+            cost_model=cost_model,
+            grouping_algorithm=grouping_algorithm,
+            grouping_params=grouping_params,
+        )
+
+        # # Assign the groups to the ranks
+        if self.rank == 0:
+            if groups is None:
+                raise ValueError("Parallel group building returned no groups on rank 0.")
+            ranks_groups, ranks_costs = self._assign_groups_to_ranks(groups)
+        else:
+            ranks_groups = None
+            ranks_costs = None
+
+        # Log the assignments for debugging purposes
+        if self.rank == 0:
+            log_domain_decomposition_assignments(ranks_groups, ranks_costs)
+
+        # Scatter the groups to the ranks
+        self.source_groups = cast(
+            List[SourceGroup] | None,
+            self.comm.scatter(ranks_groups, root=0),
+        )
+
+        # Retrieve the local grid corresponding to the assigned group of sources
+        if self.source_groups is not None:
+            if self.global_grid is None:
+                raise ValueError(
+                    "Global grid is not initialized, cannot build local grids."
+                )
+            self.local_grids = [
+                self.global_grid.get_local_grid(group) for group in self.source_groups
+            ]
+        else:
+            self.local_grids = []
+
+        # Update the cost of the subdomain with the cost of the assigned groups
+        self.cost = (
+            sum(g.comp_cost for g in self.source_groups)
+            if self.source_groups is not None
+            else 0.0
+        )
+
 
     def global_to_local_map(
         self, subgrid_index: int, global_field: np.ndarray, local_field: np.ndarray

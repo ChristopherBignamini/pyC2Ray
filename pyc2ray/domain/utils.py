@@ -167,6 +167,17 @@ def evaluate_sphere_intersection(
     return False
 
 
+def evaluate_sphere_intersection_new(
+    center_a: np.ndarray, radius_a: float, center_b: np.ndarray, radius_b: float
+) -> bool:
+    """Optimized scalar version of :func:`evaluate_sphere_intersection`."""
+    dx = float(center_a[0] - center_b[0])
+    dy = float(center_a[1] - center_b[1])
+    dz = float(center_a[2] - center_b[2])
+    radius_sum = radius_a + radius_b
+    return dx * dx + dy * dy + dz * dz < radius_sum * radius_sum
+
+
 logger = get_domain_logger(__name__)
 
 

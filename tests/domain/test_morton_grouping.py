@@ -160,3 +160,66 @@ def test_build_groups_splits_when_memory_limit_exceeded() -> None:
     assert len(groups) == 2
     assert [g.id for g in groups] == [0, 1]
     assert all(g.get_num_sources() == 1 for g in groups)
+
+
+def test_build_groups_parallel_matches_reference_multiple_sources() -> None:
+    MPI = pytest.importorskip("mpi4py.MPI")
+    comm = MPI.COMM_WORLD
+    rank = comm.Get_rank()
+
+    grouping = MortonSourceGrouping()
+    grid: Grid = RegularGrid(cell_size=1.0, num_cells=64)
+    params = MortonGroupingParams(max_num_sources_per_group=16, morton_bits=10)
+    cost_model = DummyCostModel(max_memory_cost_per_group=16.0)
+
+    positions = np.array(
+        [
+            [10.0, 10.0, 10.0],
+            [10.3, 10.0, 10.0],
+            [10.6, 10.1, 10.0],
+            [10.9, 10.1, 10.0],
+            [11.2, 10.2, 10.1],
+            [11.5, 10.2, 10.1],
+        ],
+        dtype=float,
+    )
+    radii = np.full(len(positions), 0.5, dtype=float)
+    sources = [
+        Source(
+            id=i,
+            pos=positions[i],
+            strength=1.0,
+            radius=float(radii[i]),
+        )
+        for i in range(len(positions))
+    ]
+
+    groups_ref = (
+        grouping.build_groups(sources, grid, params, cost_model)
+        if rank == 0
+        else None
+    )
+    groups_new = grouping.build_groups_parallel(
+        comm, sources, grid, params, cost_model
+    )
+
+    if rank != 0:
+        assert groups_new is None
+        return
+
+    assert groups_new is not None
+    assert groups_ref is not None
+
+    assert len(groups_ref) == len(groups_new)
+
+    for i, (g_ref, g_new) in enumerate(zip(groups_ref, groups_new)):
+        assert g_ref.id == i
+        assert g_new.id == i
+        assert g_ref.get_num_sources() == g_new.get_num_sources()
+        assert g_ref.get_source_ids() == g_new.get_source_ids()
+        assert np.allclose(g_ref.center, g_new.center, atol=1e-10, rtol=0.0)
+        assert g_ref.radius == pytest.approx(g_new.radius, abs=1e-10)
+        assert np.allclose(g_ref.bbox_min, g_new.bbox_min, atol=1e-10, rtol=0.0)
+        assert np.allclose(g_ref.bbox_max, g_new.bbox_max, atol=1e-10, rtol=0.0)
+        assert g_ref.mem_cost == pytest.approx(g_new.mem_cost, abs=1e-10)
+        assert g_ref.comp_cost == pytest.approx(g_new.comp_cost, abs=1e-10)

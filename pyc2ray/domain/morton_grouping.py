@@ -12,8 +12,14 @@ from pyc2ray.domain.cost_model import CostModel
 from pyc2ray.domain.grid import Grid
 from pyc2ray.domain.source_grouping import GroupingParams, SourceGrouping
 from pyc2ray.domain.sources import Source, SourceGroup
-from pyc2ray.domain.utils import evaluate_sphere_intersection, find_enclosing_sphere
+from pyc2ray.domain.utils import (
+    evaluate_sphere_intersection_new,
+    find_enclosing_sphere_new,
+    get_domain_logger,
+)
 
+
+logger = get_domain_logger(__name__)
 
 @dataclass
 class MortonGroupingParams(GroupingParams):
@@ -95,7 +101,7 @@ class MortonSourceGrouping(SourceGrouping):
             c = centers[0]
             R = radii[0]
         else:
-            c, R = find_enclosing_sphere(centers, radii)
+            c, R = find_enclosing_sphere_new(centers, radii)
         bbox_min = c - R
         bbox_max = c + R
         # Basic cost evaluation: number of sources times local cell count
@@ -167,21 +173,21 @@ class MortonSourceGrouping(SourceGrouping):
                 and g.mem_cost <= cost_model.max_memory_cost_per_group
             )
 
-        # TODO: optimize the loop below.
-        # For example: avoid rebuilding the same single source group at loop end when gtrial already matches current_group
-        # (last-source rejection/non-intersection path).
+        # Profiling counters to characterize grouping efficiency.
+        non_intersection_splits = 0
+        rejected_trial_groups = 0
+        accepted_trial_groups = 0
+
         source_groups: List[SourceGroup] = []
-        current_group: List[Source] = []
-        for s in ordered_sources:
-            if not current_group:
-                current_group = [s]
-                gtrial = self._build_group(current_group, grid, cost_model)
-                continue
+        current_group: List[Source] = [ordered_sources[0]]
+        gtrial = self._build_group(current_group, grid, cost_model)
+        for s in ordered_sources[1:]:
 
             # Check if the new source intersects with the current group. If not, we can start a new group.
-            if not evaluate_sphere_intersection(
+            if not evaluate_sphere_intersection_new(
                 gtrial.center, gtrial.radius, s.pos, s.radius
             ):
+                non_intersection_splits += 1
                 source_groups.append(gtrial)
                 current_group = [s]
                 gtrial = self._build_group(current_group, grid, cost_model)
@@ -193,8 +199,10 @@ class MortonSourceGrouping(SourceGrouping):
             gtrial = self._build_group(trial, grid, cost_model)
 
             if valid(gtrial):
+                accepted_trial_groups += 1
                 current_group = trial
             else:
+                rejected_trial_groups += 1
                 source_groups.append(self._build_group(current_group, grid, cost_model))
                 current_group = [s]
                 gtrial = self._build_group(current_group, grid, cost_model)
@@ -206,4 +214,200 @@ class MortonSourceGrouping(SourceGrouping):
         for i, g in enumerate(source_groups):
             g.id = i
 
+        logger.info(
+            (
+                "Morton grouping stats | num_sources=%d num_groups=%d "
+                "accepted_trial_merges=%d rejected_trial_merges=%d "
+                "non_intersection_splits=%d"
+            ),
+            len(sources),
+            len(source_groups),
+            accepted_trial_groups,
+            rejected_trial_groups,
+            non_intersection_splits,
+        )
+
         return source_groups
+
+    # TODO: check source ordering influence on group creation: ideally, the order of sources in the input list should not influence the final groups,
+    # which should only depend on their spatial distribution and on the cost model.
+    def build_groups_parallel(
+        self,
+        comm,
+        sources: List[Source],
+        grid: Grid,
+        grouping_params: GroupingParams,
+        cost_model: CostModel,
+    ) -> List[SourceGroup] | None:
+        """Build the groups of sources to be assigned to the ranks using Morton ordering.
+
+        Parameters
+        ----------
+        sources : List of sources in the provided grid.
+        grid : The grid of the simulation. (can be a sub-grid, in case of recursive grouping)
+        grouping_params : The parameters for the Morton grouping algorithm. Must be an
+        instance of MortonGroupingParams.
+        cost_model : The cost model to use for the evaluation of the cost of processing a group of sources.
+
+        Returns
+        -------
+        The list of source groups to be assigned to the ranks.
+        """
+        if not isinstance(grouping_params, MortonGroupingParams):
+            raise TypeError("Morton grouping requires MortonGroupingParams.")
+
+        rank = comm.Get_rank()
+        num_chunks = comm.Get_size()
+
+        if rank == 0:
+            # Compute spatial ordering
+            ordered_sources = sorted(
+                sources,
+                key=lambda s: self._morton_like_key(
+                    s.pos,
+                    grid.get_domain_min(),
+                    grid.get_domain_max(),
+                    grouping_params.morton_bits,
+                ),
+            )
+
+            # Split into exactly one chunk per rank; some chunks may be empty.
+            chunk_size, extra = divmod(len(ordered_sources), num_chunks)
+            ordered_source_chunks = []
+            start = 0
+            for chunk_idx in range(num_chunks):
+                end = start + chunk_size + (1 if chunk_idx < extra else 0)
+                ordered_source_chunks.append(ordered_sources[start:end])
+                start = end
+        else:
+            ordered_source_chunks = None
+
+        # Scatter the chunks to all ranks
+        local_ordered_sources = comm.scatter(ordered_source_chunks, root=0)
+
+        def valid(g: SourceGroup) -> bool:
+            return (
+                len(g.sources) <= grouping_params.max_num_sources_per_group
+                and g.mem_cost <= cost_model.max_memory_cost_per_group
+            )
+
+        # Profiling counters to characterize grouping efficiency.
+        non_intersection_splits = 0
+        rejected_trial_groups = 0
+        accepted_trial_groups = 0
+
+        local_source_groups: List[SourceGroup] = []
+        if local_ordered_sources:
+            current_group: List[Source] = [local_ordered_sources[0]]
+            gtrial = self._build_group(current_group, grid, cost_model)
+            for s in local_ordered_sources[1:]:
+
+                # Check if the new source intersects with the current group. If not, we can start a new group.
+                if not evaluate_sphere_intersection_new(
+                    gtrial.center, gtrial.radius, s.pos, s.radius
+                ):
+                    non_intersection_splits += 1
+                    local_source_groups.append(gtrial)
+                    current_group = [s]
+                    gtrial = self._build_group(current_group, grid, cost_model)
+                    continue
+
+                # If the new source intersects with the current group
+                # we try to add it to the group and check if it's still valid.
+                trial = current_group + [s]
+                gtrial = self._build_group(trial, grid, cost_model)
+
+                if valid(gtrial):
+                    accepted_trial_groups += 1
+                    current_group = trial
+                else:
+                    rejected_trial_groups += 1
+                    local_source_groups.append(
+                        self._build_group(current_group, grid, cost_model)
+                    )
+                    current_group = [s]
+                    gtrial = self._build_group(current_group, grid, cost_model)
+
+            local_source_groups.append(
+                self._build_group(current_group, grid, cost_model)
+            )
+
+        # Gather all local groups (and original chunk indices) to the root rank
+        num_local_groups = len(local_source_groups)
+        all_source_groups = comm.gather(local_source_groups, root=0)
+        all_num_local_groups = comm.gather(num_local_groups, root=0)
+        all_accepted_trial_groups = comm.gather(accepted_trial_groups, root=0)
+        all_rejected_trial_groups = comm.gather(rejected_trial_groups, root=0)
+        all_non_intersection_splits = comm.gather(non_intersection_splits, root=0)
+
+        if rank == 0:
+            tmp_source_groups = [
+                group
+                for rank_source_groups in all_source_groups
+                for group in rank_source_groups
+            ]
+            tmp_source_groups_chunk_indexes = [0]
+            for n_groups in all_num_local_groups:
+                tmp_source_groups_chunk_indexes.append(
+                    tmp_source_groups_chunk_indexes[-1] + n_groups
+                )
+            accepted_trial_groups = sum(all_accepted_trial_groups)
+            rejected_trial_groups = sum(all_rejected_trial_groups)
+            non_intersection_splits = sum(all_non_intersection_splits)
+
+
+        if comm.Get_rank() == 0:
+            # Check if groups from different ranks can be merged together. This check is only
+            # performed among groups that are close to the boundary between ranks, in order to
+            # avoid spurious group splitting only due to the spatial partitioning of sources among
+            # ranks. This is a simple heuristic that can be improved in the future by implementing
+            # a more global merging strategy.
+            source_groups = []
+            accepted_merged_groups = 0
+            rejected_merged_groups = 0
+            for chunk_idx in range(comm.Get_size()):
+                chunk_start = tmp_source_groups_chunk_indexes[chunk_idx]
+                chunk_end = tmp_source_groups_chunk_indexes[chunk_idx + 1]
+                chunk_groups = tmp_source_groups[chunk_start:chunk_end]
+                if not chunk_groups:
+                    continue
+
+                if source_groups:
+                    # Try to merge the first group of the current chunk with the last group of the previous chunk
+                    prev_group = source_groups[-1]
+                    curr_group = chunk_groups[0]
+                    trial = self._build_group(
+                        prev_group.sources + curr_group.sources, grid, cost_model
+                    )
+                    if valid(trial):
+                        accepted_merged_groups += 1
+                        source_groups[-1] = trial
+                        chunk_groups = chunk_groups[1:]
+                    else:
+                        rejected_merged_groups += 1
+
+                source_groups.extend(chunk_groups)
+
+            # Update group IDs
+            for i, g in enumerate(source_groups):
+                g.id = i
+
+            logger.info(
+                (
+                    "Morton grouping stats | num_sources=%d num_groups=%d "
+                    "accepted_trial_merges=%d rejected_trial_merges=%d "
+                    "accepted_merged_merges=%d rejected_merged_merges=%d "
+                    "non_intersection_splits=%d"
+                ),
+                len(sources),
+                len(source_groups),
+                accepted_trial_groups,
+                rejected_trial_groups,
+                accepted_merged_groups,
+                rejected_merged_groups,
+                non_intersection_splits,
+            )
+
+            return source_groups
+
+        return None

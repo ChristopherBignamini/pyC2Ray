@@ -5,6 +5,8 @@ of the Grid interface for regular cubic grids.
 
 from __future__ import annotations
 
+from math import ceil, floor
+
 import numpy as np
 
 from pyc2ray.domain.grid import Grid
@@ -215,6 +217,29 @@ class RegularGrid(Grid):
         d = np.maximum(0.0, overlap_max - overlap_min)
         return float(d[0] * d[1] * d[2])
 
+    def _overlap_volume_new(self, box_min, box_max) -> float:
+        """Optimized scalar version of :meth:`_overlap_volume`."""
+        if (
+            box_max[0] <= box_min[0]
+            or box_max[1] <= box_min[1]
+            or box_max[2] <= box_min[2]
+        ):
+            raise ValueError(
+                'Invalid box: max corners must be "greater" than min corner.'
+            )
+
+        domain_min_x = float(self.offset[0] * self.cell_size)
+        domain_min_y = float(self.offset[1] * self.cell_size)
+        domain_min_z = float(self.offset[2] * self.cell_size)
+        domain_max_x = domain_min_x + self.num_cells * self.cell_size
+        domain_max_y = domain_min_y + self.num_cells * self.cell_size
+        domain_max_z = domain_min_z + self.num_cells * self.cell_size
+
+        dx = max(0.0, min(domain_max_x, box_max[0]) - max(domain_min_x, box_min[0]))
+        dy = max(0.0, min(domain_max_y, box_max[1]) - max(domain_min_y, box_min[1]))
+        dz = max(0.0, min(domain_max_z, box_max[2]) - max(domain_min_z, box_min[2]))
+        return float(dx * dy * dz)
+
     # TODO: the SourceGroup should not be needed here, the bounding box is enough. More in general, since
     # the region of influence of a source group could be defined in more complex ways than just a box,
     # a specific class should be implemented to represent the region itself and passed to this method.
@@ -268,22 +293,38 @@ class RegularGrid(Grid):
         -------
         The number of cells in the box defined by the minimum and maximum corners.
         """
-        vol = self._overlap_volume(box_min, box_max)
-        if vol > 0.0:
-            min_indexes = np.floor(box_min / self.cell_size).astype(int)
-            max_indexes = np.ceil(box_max / self.cell_size).astype(int) - 1
-            if self.is_periodic_mode_active:
-                # This calculation already accounts for the fact that the box may be partially outside the grid domain
-                return int(np.prod((max_indexes - min_indexes + 1)))
-            else:
-                # In non-periodic mode, if the box extends outside the domain, we consider only the part inside the domain for the cell count
-                min_indexes_clipped = np.maximum(min_indexes, self.offset)
-                max_indexes_clipped = np.minimum(
-                    max_indexes, self.offset + self.num_cells - 1
-                )
-                return int(np.prod((max_indexes_clipped - min_indexes_clipped + 1)))
-        else:
+        if self._overlap_volume_new(box_min, box_max) <= 0.0:
             return 0
+
+        cell_size = self.cell_size
+        offset_x = int(self.offset[0])
+        offset_y = int(self.offset[1])
+        offset_z = int(self.offset[2])
+
+        min_x = floor(float(box_min[0]) / cell_size)
+        min_y = floor(float(box_min[1]) / cell_size)
+        min_z = floor(float(box_min[2]) / cell_size)
+        max_x = ceil(float(box_max[0]) / cell_size) - 1
+        max_y = ceil(float(box_max[1]) / cell_size) - 1
+        max_z = ceil(float(box_max[2]) / cell_size) - 1
+
+        if self.is_periodic_mode_active:
+            # This calculation already accounts for the fact that the box may be partially outside the grid domain
+            return int(
+                (max_x - min_x + 1) * (max_y - min_y + 1) * (max_z - min_z + 1)
+            )
+
+        # In non-periodic mode, count only the part inside the domain.
+        max_offset_x = offset_x + self.num_cells - 1
+        max_offset_y = offset_y + self.num_cells - 1
+        max_offset_z = offset_z + self.num_cells - 1
+        min_x = max(min_x, offset_x)
+        min_y = max(min_y, offset_y)
+        min_z = max(min_z, offset_z)
+        max_x = min(max_x, max_offset_x)
+        max_y = min(max_y, max_offset_y)
+        max_z = min(max_z, max_offset_z)
+        return int((max_x - min_x + 1) * (max_y - min_y + 1) * (max_z - min_z + 1))
 
     def global_to_local_index_map(self, global_index: np.ndarray) -> np.ndarray:
         """Map a global grid index to the corresponding local grid index.

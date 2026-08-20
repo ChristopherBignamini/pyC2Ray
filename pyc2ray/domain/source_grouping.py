@@ -27,3 +27,9 @@ class SourceGrouping:
         self, sources, grid, grouping_params: GroupingParams, cost_model: CostModel
     ) -> List[SourceGroup]:
         raise NotImplementedError("Call to build_groups abstract method.")
+
+    @abstractmethod
+    def build_groups_parallel(
+        self, comm, sources, grid, grouping_params: GroupingParams, cost_model: CostModel
+    ) -> List[SourceGroup] | None:
+        raise NotImplementedError("Call to build_groups_parallel abstract method.")

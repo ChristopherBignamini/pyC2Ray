@@ -28,7 +28,7 @@ DOMAIN_MAX = 100.0
 GLOBAL_GRID_CELLS_PER_SIDE = 250
 CACHE_DIR = Path(__file__).resolve().parent / "cache_npy_sources"
 MAX_MEMORY_COST_PER_GROUP = max_memory_cost_per_group
-GROUPING_MAX_SOURCES = 5
+GROUPING_MAX_SOURCES = 500
 GROUPING_MORTON_BITS = 10
 SOURCE_BATCH_SIZE = 1
 PHOTO_ION_TABLE_SIZE = 2000
@@ -505,16 +505,16 @@ def main() -> None:
 		print(f"- source groups assigned to rank: {subdomain.get_num_source_groups()}")
 		print(f"- rank decomposition cost: {subdomain.cost:.3e}")
 
-		# npz_path = CACHE_DIR / f"domain_decomposition_rank{subdomain.rank}.npz"
-		# local_regular_grids = [cast(RegularGrid, g) for g in subdomain.get_local_grids()]
-		# exported_npz = export_domain_decomposition_npz(
-		# 	global_grid=global_grid,
-		# 	source_groups=subdomain.get_source_groups(),
-		# 	local_grids=local_regular_grids,
-		# 	output_path=npz_path,
-		# )
+		npz_path = CACHE_DIR / f"domain_decomposition_rank{subdomain.rank}.npz"
+		local_regular_grids = [cast(RegularGrid, g) for g in subdomain.get_local_grids()]
+		exported_npz = export_domain_decomposition_npz(
+			global_grid=global_grid,
+			source_groups=subdomain.get_source_groups(),
+			local_grids=local_regular_grids,
+			output_path=npz_path,
+		)
 
-		# print(f"- decomposition NPZ export: {exported_npz}")
+		print(f"- decomposition NPZ export: {exported_npz}")
 	else:
 		print("\nDecomposition summary")
 		print("- no sources available, decomposition skipped")
