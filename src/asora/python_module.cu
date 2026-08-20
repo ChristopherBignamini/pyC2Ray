@@ -139,6 +139,19 @@ PyObject *asora_is_device_init([[maybe_unused]] PyObject *self, PyObject *args) 
     return asora::device::is_initialized() ? Py_True : Py_False;
 }
 
+/// Expose whether the extension was compiled with periodic boundary mode.
+PyObject *asora_is_periodic_mode_active(
+    [[maybe_unused]] PyObject *self, [[maybe_unused]] PyObject *args
+) {
+    if (!PyArg_ParseTuple(args, "")) return nullptr;
+
+#if defined(PERIODIC)
+    Py_RETURN_TRUE;
+#else
+    Py_RETURN_FALSE;
+#endif
+}
+
 /// Allocate and copy density grid to the device.
 PyObject *asora_density_to_device([[maybe_unused]] PyObject *self, PyObject *args) {
     PyArrayObject *ndens;
@@ -178,9 +191,35 @@ PyObject *asora_source_data_to_device([[maybe_unused]] PyObject *self, PyObject 
                : nullptr;
 }
 
+/// Ensure mesh-dependent buffers exist with the expected size.
+PyObject *asora_prepare_grid_buffers([[maybe_unused]] PyObject *self, PyObject *args) {
+    size_t m1;
+    int force_matching_size = 0;
+    if (!PyArg_ParseTuple(args, "k|p", &m1, &force_matching_size)) return nullptr;
+
+    auto n_cells = m1 * m1 * m1;
+    try {
+        asora::device::ensure<double>(
+            asora::buffer_tag::number_density, n_cells,
+            static_cast<bool>(force_matching_size)
+        );
+        asora::device::ensure<double>(
+            asora::buffer_tag::fraction_HII, n_cells,
+            static_cast<bool>(force_matching_size)
+        );
+        asora::device::ensure<double>(
+            asora::buffer_tag::photo_ionization_HI, n_cells,
+            static_cast<bool>(force_matching_size)
+        );
+    } catch (const std::exception &e) {
+        PyErr_SetString(PyExc_RuntimeError, e.what());
+        return nullptr;
+    }
+    return Py_None;
+}
+
 PyObject *asora_chemistry_global_pass([[maybe_unused]] PyObject *self, PyObject *args) {
     double dt;
-    PyArrayObject *ndens;
     PyArrayObject *temp;
     PyArrayObject *xh;
     PyArrayObject *xh_av;
@@ -195,8 +234,8 @@ PyObject *asora_chemistry_global_pass([[maybe_unused]] PyObject *self, PyObject 
     size_t block_size = 512;
 
     if (!PyArg_ParseTuple(
-            args, "dOOOOOOOddddd|k", &dt, &ndens, &temp, &xh, &xh_av, &xh_int, &phi_ion,
-            &clump, &bh00, &albpow, &colh0, &temph0, &abu_c, &block_size
+            args, "dOOOOOOddddd|k", &dt, &temp, &xh, &xh_av, &xh_int, &phi_ion, &clump,
+            &bh00, &albpow, &colh0, &temph0, &abu_c, &block_size
         ))
         return nullptr;
 
@@ -205,15 +244,14 @@ PyObject *asora_chemistry_global_pass([[maybe_unused]] PyObject *self, PyObject 
     auto xh_av_data = static_cast<double *>(PyArray_DATA(xh_av));
     auto xh_int_data = static_cast<double *>(PyArray_DATA(xh_int));
     auto temp_data = static_cast<double *>(PyArray_DATA(temp));
-    auto ndens_data = static_cast<double *>(PyArray_DATA(ndens));
     auto phi_ion_data = static_cast<double *>(PyArray_DATA(phi_ion));
     auto clump_data = static_cast<double *>(PyArray_DATA(clump));
     auto n_cells = static_cast<size_t>(PyArray_SIZE(xh));
 
     try {
         auto conv_flag = asora::global_pass(
-            xh_data, xh_av_data, xh_int_data, temp_data, ndens_data, phi_ion_data,
-            clump_data, dt, bh00, albpow, colh0, temph0, abu_c, n_cells, block_size
+            xh_data, xh_av_data, xh_int_data, temp_data, phi_ion_data, clump_data, dt,
+            bh00, albpow, colh0, temph0, abu_c, n_cells, block_size
         );
         return Py_BuildValue("k", conv_flag);
     } catch (const std::exception &e) {
@@ -234,12 +272,16 @@ static PyMethodDef asoraMethods[] = {
     {"device_close", asora_device_close, METH_VARARGS, "Close device and free memory"},
     {"is_device_init", asora_is_device_init, METH_VARARGS,
      "Check if the device is initialized"},
+    {"is_periodic_mode_active", asora_is_periodic_mode_active, METH_VARARGS,
+     "Check if libasora was compiled with PERIODIC"},
     {"density_to_device", asora_density_to_device, METH_VARARGS,
      "Copy density field to the device"},
     {"photo_table_to_device", asora_photo_table_to_device, METH_VARARGS,
      "Copy radiation tables to the device"},
     {"source_data_to_device", asora_source_data_to_device, METH_VARARGS,
      "Copy source data to the device"},
+    {"prepare_grid_buffers", asora_prepare_grid_buffers, METH_VARARGS,
+     "Ensure grid buffers are allocated with exact size for mesh m1"},
     {"chemistry_global_pass", asora_chemistry_global_pass, METH_VARARGS,
      "Solve chemistry ODE"},
     {NULL, NULL, 0, NULL} /* Sentinel */

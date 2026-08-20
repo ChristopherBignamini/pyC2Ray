@@ -1,6 +1,8 @@
 import atexit
 import logging
+from functools import cached_property
 from pathlib import Path
+from typing import TypeAlias
 
 import numpy as np
 import tools21cm as t2c
@@ -10,13 +12,20 @@ from astropy.cosmology import FlatLambdaCDM, z_at_value
 from mpi4py import MPI
 
 import pyc2ray.constants as c
-from pyc2ray.asora_core import device_close, device_init, photo_table_to_device
-from pyc2ray.evolve import evolve3D
+from pyc2ray.asora_core import (
+    device_close,
+    device_init,
+    is_periodic_mode_active,
+    photo_table_to_device,
+)
+from pyc2ray.domain.domain_decomposition_handler import DomainDecompositionHandler
+from pyc2ray.evolve import ChemistryParams, evolve3D
 from pyc2ray.parameters import (
     AbundancesParameters,
     BlackBodyParameters,
     CGSParameters,
     CosmologyParameters,
+    DomainDecompositionParameters,
     GridParameters,
     MaterialParameters,
     OutputParameters,
@@ -39,6 +48,7 @@ from pyc2ray.utils.sourceutils import FloatArray, IntArray
 
 logger = logging.getLogger(__name__)
 
+ParameterClass: TypeAlias = type[YmlParameters]
 
 # ======================================================================
 # This file defines the abstract C2Ray object class, which is the basis
@@ -161,6 +171,30 @@ class C2Ray:
             # Register deallocation function (automatically calls this on program termination)
             atexit.register(device_close)
 
+        # Check if domain decomposion is compatible with MPI and GPU usage setup
+        if self.domain_decomposition_params.enabled:
+            if not self.gpu:
+                logger.warning(
+                    "Domain decomposition is only implemented for GPU raytracing. Disabling domain decomposition."
+                )
+                self.domain_decomposition_params.enabled = False
+            if not self.mpi:
+                logger.warning(
+                    "Domain decomposition is only implemented for MPI runs. Disabling domain decomposition."
+                )
+                self.domain_decomposition_params.enabled = False
+            if not is_periodic_mode_active():
+                raise NotImplementedError(
+                    "Domain decomposition is only supported with a periodic domain "
+                    "(libasora compiled with PERIODIC)."
+                )
+
+        # Persistent domain decomposition handler holding the subdomains assigned to this
+        # rank. It is created on the first evolve3D call and reused across timesteps;
+        # the handler itself decides when to rebuild its decomposition (see
+        # DomainDecompositionHandler.update_decomposition). None until the first call.
+        self._decomposition_handler: DomainDecompositionHandler | None = None
+
         # Initialize output and logger. Waits for all ranks to reach this point.
         self._output_init()
 
@@ -182,6 +216,9 @@ class C2Ray:
             logger.info(
                 f"Using CPU Raytracing (subboxsize = {self.subboxsize}, max_subbox = {self.max_subbox})"
             )
+
+        # initialize radiation tables
+        self._radiation_init()
 
         if self.mpi:
             MPI.COMM_WORLD.Barrier()
@@ -245,13 +282,12 @@ class C2Ray:
         dt : Timestep in seconds (typically generated using set_timestep method)
         src_flux : 1D array of shape (numsrc, ) containing the total ionizing flux of each source,
                    normalized by S_star (1e48 by default)
-        src_pos : 2D array of shape (3, numsrc) containing the 3D grid position of each source,
-                  in Fortran indexing (from 1)
+        src_pos : 2D array of shape (3, numsrc) containing the 3D grid position of each source
         """
         if src_pos.shape[0] != 3:
             src_pos = src_pos.T
         if len(src_flux) != src_pos.shape[1]:
-            ValueError(
+            raise ValueError(
                 "ASORA requires the shape of src_pos to be (3, num_src) and the shape of src_num to be (num_src, )."
             )
 
@@ -260,7 +296,27 @@ class C2Ray:
         # then call the evolve designed for the MPI source splitting.
         # Otherwise all ranks are calling (independently) the evolve
         # with no source splitting until the condition above is meet.
-        use_mpi = NumSrc >= self.nprocs and self.mpi
+        if not self.domain_decomposition_params.enabled:
+            use_mpi = NumSrc >= self.nprocs and self.mpi
+        else:
+            use_mpi = self.mpi
+
+        # Update the persistent domain decomposition handler.
+        if self.domain_decomposition_params.enabled:
+            if self._decomposition_handler is None:
+                self._decomposition_handler = DomainDecompositionHandler(MPI.COMM_WORLD)
+            self._decomposition_handler.update_decomposition(
+                cell_size=self.dr,
+                src_pos=src_pos.T,
+                src_flux=src_flux,
+                N=self.N,
+                R_max_LLS=self.R_max_LLS,
+                src_batch_size=self.raytracing_params.source_batch_size,
+                num_tau=self.photo_thin_table.shape[0],
+                is_domain_periodic=bool(is_periodic_mode_active()),
+                domain_decomposition_params=self.domain_decomposition_params,
+            )
+
         self.xh, self.phi_ion = evolve3D(
             dt=dt,
             dr=self.dr,
@@ -268,6 +324,7 @@ class C2Ray:
             src_pos=src_pos,
             src_batch_size=self.raytracing_params.source_batch_size,
             use_gpu=self.gpu,
+            decomposition=self._decomposition_handler,
             max_subbox=self.max_subbox,
             subboxsize=self.subboxsize,
             loss_fraction=self.loss_fraction,
@@ -284,12 +341,8 @@ class C2Ray:
             dlogtau=self.dlogtau,
             R_max_LLS=self.R_max_LLS,
             convergence_fraction=self.convergence_fraction,
-            sig=self.sig,
-            bh00=self.bh00,
-            albpow=self.albpow,
-            colh0=self.colh0,
-            temph0=self.temph0,
-            abu_c=self.abu_c,
+            sigma=self.sigma,
+            chems=self.chem_parms,
         )
 
     def cosmo_evolve(self, dt: float) -> None:
@@ -479,7 +532,7 @@ This corresponds to %.3f grid cells.""",
             self.minlogtau,
             self.dlogtau,
             self.R_max_LLS,
-            self.sig,
+            self.sigma,
         )
         self.phi_ion = gamma_ion
         return gamma_ion
@@ -503,15 +556,15 @@ This corresponds to %.3f grid cells.""",
 
     @property
     def gpu(self) -> bool:
-        return self.grid_params.gpu
+        return bool(self.grid_params.gpu)
 
     @property
     def mpi(self) -> bool:
-        return self.grid_params.mpi
+        return bool(self.grid_params.mpi)
 
     @property
     def resume(self) -> bool:
-        return self.grid_params.resume
+        return bool(self.grid_params.resume)
 
     @property
     def eth0(self) -> float:
@@ -526,28 +579,12 @@ This corresponds to %.3f grid cells.""",
         return self.cgs_params.ethe1
 
     @property
-    def bh00(self) -> float:
-        return self.cgs_params.bh00
-
-    @property
     def fh0(self) -> float:
         return self.cgs_params.fh0
 
     @property
     def xih0(self) -> float:
         return self.cgs_params.xih0
-
-    @property
-    def albpow(self) -> float:
-        return self.cgs_params.albpow
-
-    @property
-    def colh0(self) -> float:
-        return self.cgs_params.colh0
-
-    @property
-    def temph0(self) -> float:
-        return self.cgs_params.temph0
 
     @property
     def abu_h(self) -> float:
@@ -558,15 +595,11 @@ This corresponds to %.3f grid cells.""",
         return self.abundance_params.abu_he
 
     @property
-    def abu_c(self) -> float:
-        return self.abundance_params.abu_c
-
-    @property
     def mean_molecular(self) -> float:
         return self.abundance_params.mean_molecular
 
     @property
-    def sig(self) -> float:
+    def sigma(self) -> float:
         return self.photo_params.sigma_HI_at_ion_freq
 
     @property
@@ -588,6 +621,16 @@ This corresponds to %.3f grid cells.""",
     @property
     def cosmological(self) -> bool:
         return self.cosmology_params.cosmological
+
+    @cached_property
+    def chem_parms(self) -> ChemistryParams:
+        return ChemistryParams(
+            self.cgs_params.bh00,
+            self.cgs_params.albpow,
+            self.cgs_params.colh0,
+            self.cgs_params.temph0,
+            self.abundance_params.abu_c,
+        )
 
     def _cosmology_init(self) -> None:
         """Set up cosmology from parameters (H0, Omega,..)"""
@@ -648,19 +691,19 @@ Om0 = {Om0:.4f}, Ob0   = {Ob0:.4f}""")
         return Path(self.output_params.results_basename)
 
     @property
-    def inputs_basename(self) -> str:
+    def inputs_basename(self) -> Path:
         assert self.output_params.inputs_basename is not None
-        return self.output_params.inputs_basename
+        return Path(self.output_params.inputs_basename)
 
     @property
-    def sources_basename(self) -> str:
+    def sources_basename(self) -> Path:
         assert self.output_params.sources_basename is not None
-        return self.output_params.sources_basename
+        return Path(self.output_params.sources_basename)
 
     @property
-    def density_basename(self) -> str:
+    def density_basename(self) -> Path:
         assert self.output_params.density_basename is not None
-        return self.output_params.density_basename
+        return Path(self.output_params.density_basename)
 
     @property
     def logfile(self) -> Path:
@@ -862,7 +905,6 @@ This corresponds to %.3f grid cells.
 
     def _sources_init(self) -> None:
         """Initialize settings to read source files"""
-        pass
 
     # =====================================================================================================
     # OTHER PRIVATE METHODS
@@ -871,17 +913,19 @@ This corresponds to %.3f grid cells.
     def _read_paramfile(self, paramfile: PathType) -> None:
         """Read in YAML parameter file"""
         ld = YmlParameters.load_yaml(paramfile)
-        self.output_params = OutputParameters.from_dict(ld["Output"])
-        self.grid_params = GridParameters.from_dict(ld["Grid"])
-        self.raytracing_params = RaytracingParameters.from_dict(ld["Raytracing"])
-        self.material_params = MaterialParameters.from_dict(ld["Material"])
-        self.cgs_params = CGSParameters.from_dict(ld["CGS"])
-        self.cosmology_params = CosmologyParameters.from_dict(ld["Cosmology"])
-        self.abundance_params = AbundancesParameters.from_dict(ld["Abundances"])
-        self.photo_params = PhotoParameters.from_dict(ld["Photo"])
-        self.sinks_params = SinksParameters.from_dict(ld["Sinks"])
-        self.blackbody_params = BlackBodyParameters.from_dict(ld["BlackBodySource"])
-        self.sources_params = SourcesParameters.from_dict(ld["Sources"])
+
+        self.output_params = OutputParameters.from_yml(ld)
+        self.grid_params = GridParameters.from_yml(ld)
+        self.raytracing_params = RaytracingParameters.from_yml(ld)
+        self.domain_decomposition_params = DomainDecompositionParameters.from_yml(ld)
+        self.material_params = MaterialParameters.from_yml(ld)
+        self.cgs_params = CGSParameters.from_yml(ld)
+        self.cosmology_params = CosmologyParameters.from_yml(ld)
+        self.abundance_params = AbundancesParameters.from_yml(ld)
+        self.photo_params = PhotoParameters.from_yml(ld)
+        self.sinks_params = SinksParameters.from_yml(ld)
+        self.blackbody_params = BlackBodyParameters.from_yml(ld)
+        self.sources_params = SourcesParameters.from_yml(ld)
 
     def _gpu_close(self) -> None:
         """Deallocate GPU memory"""

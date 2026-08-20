@@ -14,8 +14,8 @@ def test_regular_grid_domain_min_max_with_offset() -> None:
         cell_size=2.0, num_cells=4, offset=np.array([1, 2, 3], dtype=np.int64)
     )
 
-    np.testing.assert_array_equal(grid.get_domain_min(), np.array([2.0, 4.0, 6.0]))
-    np.testing.assert_array_equal(grid.get_domain_max(), np.array([10.0, 12.0, 14.0]))
+    np.testing.assert_allclose(grid.get_domain_min(), np.array([2.0, 4.0, 6.0]))
+    np.testing.assert_allclose(grid.get_domain_max(), np.array([10.0, 12.0, 14.0]))
 
 
 def test_regular_grid_global_to_local_map_non_periodic() -> None:
@@ -172,16 +172,23 @@ def test_regular_grid_local_to_global_map_periodic_set_and_add() -> None:
     grid.local_to_global_map(local_field, global_field, add=False)
     assert np.all(global_field == expected_global_field)
 
-    expected_global_field[0, 0, 0] = 2
-    expected_global_field[3, 0, 0] = 2
-    expected_global_field[3, 3, 0] = 2
-    expected_global_field[0, 3, 0] = 2
-    expected_global_field[0, 0, 3] = 2
-    expected_global_field[0, 3, 3] = 2
-    expected_global_field[3, 0, 3] = 2
-    expected_global_field[3, 3, 3] = 2
+    expected_global_field *= 2
     grid.local_to_global_map(local_field, global_field, add=True)
     assert np.all(global_field == expected_global_field)
+
+
+def test_regular_grid_periodic_mapping_rejects_duplicate_wrapping() -> None:
+    grid = RegularGrid(
+        cell_size=1.0,
+        num_cells=5,
+        offset=np.array([3, 3, 3], dtype=np.int64),
+        is_periodic_mode_active=True,
+    )
+    local_field = np.ones((5, 5, 5), dtype=float)
+    global_field = np.zeros((4, 4, 4), dtype=float)
+
+    with pytest.raises(ValueError, match="multiple local cells"):
+        grid.local_to_global_map(local_field, global_field, add=True)
 
 
 def test_regular_grid_local_to_global_map_periodic_set_and_add_included() -> None:
@@ -276,6 +283,23 @@ def test_regular_grid_get_local_grid_outside_domain_is_empty() -> None:
 
     assert local_grid.num_cells == 0
     np.testing.assert_array_equal(local_grid.offset, np.array([0, 0, 0]))
+
+
+def test_regular_grid_mapping_with_empty_local_grid() -> None:
+    grid = RegularGrid(cell_size=1.0, num_cells=0)
+    global_field = np.ones((4, 4, 4), dtype=float)
+    local_field = np.empty((1, 1, 1), dtype=float)
+
+    grid.global_to_local_map(global_field, local_field)
+
+    assert local_field.shape == (0, 0, 0)
+
+    expected_global_field = global_field.copy()
+    grid.local_to_global_map(local_field, global_field, add=False)
+    np.testing.assert_allclose(global_field, expected_global_field)
+
+    grid.local_to_global_map(local_field, global_field, add=True)
+    np.testing.assert_allclose(global_field, expected_global_field)
 
 
 def test_regular_grid_index_and_position_maps() -> None:

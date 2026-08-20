@@ -10,14 +10,14 @@ local subdomain grid indexes and global grid indexes.
 
 from __future__ import annotations
 
-from abc import abstractmethod
+from abc import ABC, abstractmethod
 
 import numpy as np
 
 from pyc2ray.domain.sources import SourceGroup
 
 
-class Grid:
+class Grid(ABC):
     """Base class for grid representation, providing a common interface for different
        grid implementations.
 
@@ -38,7 +38,6 @@ class Grid:
         -------
         The minimum corner of the domain (shape `(3,)`).
         """
-        raise NotImplementedError("Call to get_domain_min abstract method.")
 
     @abstractmethod
     def get_domain_max(self) -> np.ndarray:
@@ -48,7 +47,23 @@ class Grid:
         -------
         The maximum corner of the domain (shape `(3,)`).
         """
-        raise NotImplementedError("Call to get_domain_max abstract method.")
+
+    @abstractmethod
+    def get_average_cell_size(self, position: np.ndarray) -> float:
+        """Get a representative (average) cell size of the grid in the neighbourhood of a position.
+
+        This is meant to convert physical lengths (e.g. a source radius of influence) into a number
+        of grid cells. For uniform grids the result is constant; for non-uniform grids (e.g. adaptive
+        mesh refinement) it depends on the local resolution around the provided position.
+
+        Parameters
+        ----------
+        position : The position in domain coordinates at which to evaluate the cell size (shape `(3,)`).
+
+        Returns
+        -------
+        The representative cell size of the grid around the provided position.
+        """
 
     @abstractmethod
     def global_to_local_map(
@@ -62,7 +77,6 @@ class Grid:
         local_field : The field defined on the local grid initialized with the corresponding values
         from the global grid. This is an I/O parameter.
         """
-        raise NotImplementedError("Call to global_to_local_map abstract method.")
 
     @abstractmethod
     def local_to_global_map(
@@ -79,7 +93,6 @@ class Grid:
         add : If True, the local field values are added to the global field values. If False, the local
         field values are set to the global field values.
         """
-        raise NotImplementedError("Call to local_to_global_map abstract method.")
 
     # TODO: design issue: this function implicitly assumes that the local grid
     # is a subset of the global grid, which is the case for regular grids but
@@ -98,7 +111,6 @@ class Grid:
         -------
         The corresponding local grid index (shape `(3,)`).
         """
-        raise NotImplementedError("Call to global_to_local_index_map abstract method.")
 
     @abstractmethod
     def global_to_local_position_map(self, global_position: np.ndarray) -> np.ndarray:
@@ -113,7 +125,6 @@ class Grid:
         The corresponding local subdomain coordinates (shape `(3,)`).
             The corresponding local grid index (shape `(3,)`).
         """
-        raise NotImplementedError("Call to global_to_local_index_map abstract method.")
 
     @abstractmethod
     def get_local_grid(self, source_group: SourceGroup) -> Grid:
@@ -127,7 +138,6 @@ class Grid:
         -------
         The local grid corresponding to the region of influence of the source group of the subdomain.
         """
-        raise NotImplementedError("Call to get_local_grid abstract method.")
 
     @abstractmethod
     def find_num_cells_in_box(self, box_min: np.ndarray, box_max: np.ndarray) -> int:
@@ -142,7 +152,6 @@ class Grid:
         -------
         The number of cells in the box defined by the minimum and maximum corners.
         """
-        raise NotImplementedError("Call to find_num_cells_in_box abstract method.")
 
     @abstractmethod
     def resize_local_field(self, local_field: np.ndarray) -> None:
@@ -152,4 +161,3 @@ class Grid:
         ----------
         local_field : The local field to resize (IO parameter).
         """
-        raise NotImplementedError("Call to resize_local_field abstract method.")

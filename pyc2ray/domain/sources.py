@@ -4,11 +4,12 @@ classes, which represent a single source in the simulation and the groups
 of them that belong together in the domain decomposition, respectively.
 """
 
-from typing import List
+from dataclasses import dataclass
 
 import numpy as np
 
 
+@dataclass
 class Source:
     """Represents a single radiation source.
 
@@ -24,17 +25,10 @@ class Source:
         Maximum tracing/influence radius for this source.
     """
 
-    def __init__(
-        self,
-        id: int,
-        pos: np.ndarray,
-        strength: float,
-        radius: float,
-    ) -> None:
-        self.id = id
-        self.pos = pos
-        self.strength = strength
-        self.radius = radius
+    id: int
+    pos: np.ndarray
+    strength: float
+    radius: float
 
 
 class SourceGroup:
@@ -54,7 +48,7 @@ class SourceGroup:
     ----------
     id : int
         Global group identifier.
-    sources : List[Source]
+    sources : list[Source]
         Sources that belong to this group.
     center : np.ndarray
         Center of the enclosing sphere of grouped source spheres.
@@ -78,7 +72,7 @@ class SourceGroup:
     def __init__(
         self,
         id: int,
-        sources: List[Source],
+        sources: list[Source],
         center: np.ndarray,
         radius: float,
         bbox_min: np.ndarray,
@@ -95,10 +89,10 @@ class SourceGroup:
         self.mem_cost = mem_cost
         self.comp_cost = comp_cost
 
-    def get_source_ids(self) -> List[int]:
+    def get_source_ids(self) -> list[int]:
         """Return the list of source global IDs in this group."""
         return [s.id for s in self.sources]
 
-    def get_num_sources(self) -> int:
+    def __len__(self) -> int:
         """Return the number of sources in this group."""
         return len(self.sources)

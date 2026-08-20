@@ -17,7 +17,7 @@ class CostModel(ABC):
 
     Attributes
     ----------
-    max_cost_per_group : Maximum (model dependent) allowed cost for a source group,
+    max_memory_cost_per_group : Maximum (model dependent) allowed memory cost for a source group,
     used as a threshold in grouping algorithms.
     """
 
@@ -40,7 +40,6 @@ class CostModel(ABC):
         -------
         The computed memory and computational costs of processing the group.
         """
-        raise NotImplementedError("Call to compute_group_costs abstract method.")
 
 
 class pyC2RayCostModel(CostModel):
@@ -92,8 +91,8 @@ class pyC2RayCostModel(CostModel):
 
         # TODO: these calculations are already present in multiple places,
         # refactoring is needed
-        q_max = np.ceil(sqrt(3) * min(R, sqrt(3) * n_cells_per_side / 2))
-        cells_to_shell = (1 + 2 * q_max) * (3 + 2 * q_max * (1 + q_max)) / 3
+        q_max = int(np.ceil(sqrt(3) * min(R, sqrt(3) * n_cells_per_side / 2)))
+        cells_to_shell = (1 + 2 * q_max) * (3 + 2 * q_max * (1 + q_max)) // 3
         return cells_to_shell
 
     def compute_group_costs(
@@ -160,7 +159,7 @@ class pyC2RayCostModel(CostModel):
         if self.is_periodic_mode_active:
             comp_cost = n_src * min(n_cells, cells_to_shell)
             return mem_cost, comp_cost
-        else:
-            raise NotImplementedError(
-                "Computational cost model for non-periodic mode is not implemented."
-            )
+
+        raise NotImplementedError(
+            "Computational cost model for non-periodic mode is not implemented."
+        )

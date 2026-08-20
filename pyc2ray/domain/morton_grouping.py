@@ -3,8 +3,8 @@ This file contains the MortonGroupingParams and MortonSourceGrouping classes,
 which provide an implementation of the Morton ordering-based grouping algorithm.
 """
 
+import logging
 from dataclasses import dataclass
-from typing import List
 
 import numpy as np
 
@@ -13,23 +13,19 @@ from pyc2ray.domain.grid import Grid
 from pyc2ray.domain.source_grouping import GroupingParams, SourceGrouping
 from pyc2ray.domain.sources import Source, SourceGroup
 from pyc2ray.domain.utils import (
-    evaluate_sphere_intersection_new,
+    evaluate_sphere_intersection, 
+    evaluate_sphere_intersection_new, 
+    find_enclosing_sphere,
     find_enclosing_sphere_new,
-    get_domain_logger,
 )
 
-
-logger = get_domain_logger(__name__)
+logger = logging.getLogger(__name__)
 
 @dataclass
 class MortonGroupingParams(GroupingParams):
     """Parameters specific to the Morton grouping algorithm."""
 
-    def __init__(
-        self, max_num_sources_per_group: int = 10, morton_bits: int = 10
-    ) -> None:
-        super().__init__(max_num_sources_per_group)
-        self.morton_bits: int = morton_bits
+    morton_bits: int = 10
 
 
 # TODO: split geometric ordeding (Morton-like key) from the actual grouping logic,
@@ -55,22 +51,34 @@ class MortonSourceGrouping(SourceGrouping):
         -------
         Morton-like key for the point.
         """
-        # Normalize to [0, 1]
+        # Normalize input coordinates to [0, 1]
         normalized_position = np.clip(
             (p - domain_min) / np.maximum(domain_max - domain_min, 1e-12),
             0.0,
             1.0 - 1e-12,
         )
 
-        # Scale to integer by shifting by bits.
+        # Scale to integer by shifting by bits: the normalized_position input position is a 3 element array
+        # of floating point numbers in [0, 1], so multiplying them by 2^bits gives an integer in [0, 2^bits)
+        # when truncated. THe larger the bits, the finer the spatial resolution of the Morton ordering, but
+        # also the larger the resulting keys (which can affect performance and memory usage).
         int_position = (normalized_position * (1 << bits)).astype(int)
 
+        # Interleave bits to get the Morton key. The interleaving is done by taking the bits of each coordinate
+        # and placing them in the final key in an interleaved manner.
+        # TODO: the loop over bits for each coordinate for each source can become a hotspot when ordering large
+        # source lists. Consider using a faster bit-interleaving approach (e.g., precomputed lookup tables per byte/word,
+        # vectorized numpy where practical, or a specialized Morton encoding routine) to reduce per-source overhead during sorting.
         def split_by_3(v: int) -> int:
             out = 0
             for i in range(bits):
                 out |= ((v >> i) & 1) << (3 * i)
             return out
 
+        # The final Morton key is obtained by interleaving the bits of the x, y, and z coordinates.
+        # For example, if bits=10, we take the 10 bits of the x coordinate and place them in positions 0, 3, 6, ...,
+        # the 10 bits of the y coordinate and place them in positions 1, 4, 7, ..., and the 10 bits of the z coordinate
+        # and place them in positions 2, 5, 8, ... of the final key.
         return (
             split_by_3(int_position[0])
             | (split_by_3(int_position[1]) << 1)
@@ -78,7 +86,7 @@ class MortonSourceGrouping(SourceGrouping):
         )
 
     def _build_group(
-        self, group_sources: List[Source], grid: Grid, cost_model: CostModel
+        self, group_sources: list[Source], grid: Grid, cost_model: CostModel
     ) -> SourceGroup:
         """
         Build a group of sources and compute its geometric and cost properties.
@@ -97,11 +105,7 @@ class MortonSourceGrouping(SourceGrouping):
 
         # Find group enclosing sphere and bounding box. The enclosing sphere is used for the radius constraint,
         # while the bounding box is used to estimate the local cell count for cost evaluation.
-        if len(group_sources) == 1:
-            c = centers[0]
-            R = radii[0]
-        else:
-            c, R = find_enclosing_sphere_new(centers, radii)
+        c, R = find_enclosing_sphere_new(centers, radii)
         bbox_min = c - R
         bbox_max = c + R
         # Basic cost evaluation: number of sources times local cell count
@@ -110,8 +114,12 @@ class MortonSourceGrouping(SourceGrouping):
         # TODO: this estimate of n_cells_per_side is not correct in case of non periodic conditions
         n_cells_in_box = grid.find_num_cells_in_box(bbox_min, bbox_max)
         n_cells_per_side = max(1, int(np.ceil(n_cells_in_box ** (1.0 / 3.0))))
+        # The cost model expects the radius of influence in grid units, while the source radius is
+        # stored as a physical length. Convert it using the local cell size around the group center
+        # (constant for regular grids, position dependent for non-uniform grids such as AMR).
+        radius_in_grid_units = group_sources[0].radius / grid.get_average_cell_size(c)
         mem_cost, comp_cost = cost_model.compute_group_costs(
-            group_sources[0].radius,
+            radius_in_grid_units,
             n_cells_per_side,
             len(group_sources),
         )
@@ -131,11 +139,11 @@ class MortonSourceGrouping(SourceGrouping):
     # which should only depend on their spatial distribution and on the cost model.
     def build_groups(
         self,
-        sources: List[Source],
+        sources: list[Source],
         grid: Grid,
         grouping_params: GroupingParams,
         cost_model: CostModel,
-    ) -> List[SourceGroup]:
+    ) -> list[SourceGroup]:
         """Build the groups of sources to be assigned to the ranks using Morton ordering.
 
         Parameters
@@ -178,8 +186,8 @@ class MortonSourceGrouping(SourceGrouping):
         rejected_trial_groups = 0
         accepted_trial_groups = 0
 
-        source_groups: List[SourceGroup] = []
-        current_group: List[Source] = [ordered_sources[0]]
+        source_groups: list[SourceGroup] = []
+        current_group: list[Source] = [ordered_sources[0]]
         gtrial = self._build_group(current_group, grid, cost_model)
         for s in ordered_sources[1:]:
 
@@ -234,11 +242,11 @@ class MortonSourceGrouping(SourceGrouping):
     def build_groups_parallel(
         self,
         comm,
-        sources: List[Source],
+        sources: list[Source],
         grid: Grid,
         grouping_params: GroupingParams,
         cost_model: CostModel,
-    ) -> List[SourceGroup] | None:
+    ) -> list[SourceGroup] | None:
         """Build the groups of sources to be assigned to the ranks using Morton ordering.
 
         Parameters
@@ -251,13 +259,22 @@ class MortonSourceGrouping(SourceGrouping):
 
         Returns
         -------
-        The list of source groups to be assigned to the ranks.
+        The list of source groups to be assigned to the ranks on rank 0, and None on
+        all other ranks. Must be called by all ranks with the same source list.
         """
         if not isinstance(grouping_params, MortonGroupingParams):
             raise TypeError("Morton grouping requires MortonGroupingParams.")
 
         rank = comm.Get_rank()
         num_chunks = comm.Get_size()
+
+        # This is a collective routine: every rank must reach the scatter/gather calls
+        # below, so returning early here is only safe because `sources` is the full,
+        # replicated source list, which makes all ranks agree on this condition. Do not
+        # turn this into a rank-local check on a partial source list: ranks taking
+        # different branches would deadlock on the collectives.
+        if not sources:
+            return [] if rank == 0 else None
 
         if rank == 0:
             # Compute spatial ordering
@@ -296,9 +313,9 @@ class MortonSourceGrouping(SourceGrouping):
         rejected_trial_groups = 0
         accepted_trial_groups = 0
 
-        local_source_groups: List[SourceGroup] = []
+        local_source_groups: list[SourceGroup] = []
         if local_ordered_sources:
-            current_group: List[Source] = [local_ordered_sources[0]]
+            current_group: list[Source] = [local_ordered_sources[0]]
             gtrial = self._build_group(current_group, grid, cost_model)
             for s in local_ordered_sources[1:]:
 

@@ -4,12 +4,8 @@ import numpy as np
 import pytest
 from numpy.typing import NDArray
 
+from pyc2ray.lib import libasoratest
 from pyc2ray.load_extensions import libasora
-
-try:
-    import pyc2ray.lib.libasoratest as libasoratest
-except ImportError:
-    libasoratest = None
 
 
 @pytest.mark.skipif(libasora is None, reason="libasora.so missing, skipping tests")
@@ -85,7 +81,7 @@ class TestLibasoraTest:
             q_tot += 4 * q**2 + 2
             assert libasoratest.cells_to_shell(q) == q_tot
 
-    @pytest.mark.parametrize("q", range(0, Q_MAX))
+    @pytest.mark.parametrize("q", range(Q_MAX))
     def test_shell_mapping(self, q: int) -> None:
         cells: set[tuple[int, int, int]] = set()
         q_max = 4 * q**2 + 2 if q > 0 else 1
@@ -166,3 +162,31 @@ class TestLibasora:
         libasora.source_data_to_device(*create_source_data(50))
         libasora.source_data_to_device(*create_source_data(100))
         libasora.source_data_to_device(*create_source_data(80))
+
+    def test_prepare_grid_buffers(self, init_device):
+        # One argument required
+        with pytest.raises(TypeError):
+            libasora.prepare_grid_buffers()
+
+        # More than two arguments is invalid
+        with pytest.raises(TypeError):
+            libasora.prepare_grid_buffers(16, False, 0)
+
+        # Exercise both default mode and exact-size-forcing mode.
+        libasora.prepare_grid_buffers(16)
+        libasora.prepare_grid_buffers(16, True)
+        libasora.prepare_grid_buffers(24, False)
+
+        # Verify subsequent number-density upload remains functional.
+        dens = np.full(24**3, 0.5, dtype=np.float64)
+        libasora.density_to_device(dens)
+
+    def test_prepare_grid_buffers_forced_mode_idempotent(self, init_device):
+        # Repeated exact-size enforcement should be idempotent and not raise.
+        libasora.prepare_grid_buffers(20, True)
+        libasora.prepare_grid_buffers(20, True)
+        libasora.prepare_grid_buffers(20, True)
+
+        # Keep integration-level sanity check with a matching density upload.
+        dens = np.full(20**3, 0.5, dtype=np.float64)
+        libasora.density_to_device(dens)

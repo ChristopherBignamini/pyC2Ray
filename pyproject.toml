@@ -3,7 +3,7 @@ build-backend = "mesonpy"
 requires = [
   "charset-normalizer",
   "meson-python",
-  "meson",
+  "meson==1.11.2",
   "numpy>=2",
 ]
 
@@ -12,8 +12,10 @@ name = "pyc2ray"
 version = "0.1.0"
 description = "Python-wrapped and Accelerated version of C2Ray"
 maintainers = [
-  { name = "Patrick Hirling & Michele Bianco" },
+  {name = "Michele Bianco", email = "mbianc@ethz.ch"},
+  {name = "Tommaso Boschi", email = "tboschi@phys.ethz.ch"}
 ]
+
 requires-python = ">=3.10"
 classifiers = [
   "Programming Language :: Python :: 3 :: Only",
@@ -24,9 +26,10 @@ classifiers = [
   "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
+  "astropy==7.2.1",
   "h5py",
   "mpi4py==4.0.3",
-  "numpy",
+  "numpy>=2",
   "scipy",
   "tools21cm",
 ]
@@ -34,10 +37,10 @@ dependencies = [
 [project.optional-dependencies]
 lint = [
   "pre-commit",
-  "ruff",
-  "clang-format",
-  "mypy",
-  "meson",
+  "ruff==0.16.1",
+  "clang-format==22.1.5",
+  "mypy==2.3.0",
+  "meson==1.11.2",
   "types-PyYAML",
 ]
 test = [
@@ -46,11 +49,16 @@ test = [
 ]
 dev = ["pyc2ray[lint,test]"]
 
-[tool.pytest.ini_options]
-testpaths = "tests"
+[tool.pytest]
+testpaths = ["tests"]
+addopts = ["--benchmark-skip"]
 
 [tool.meson-python.args]
 setup = ["-Dbuildtype=release"]
 
 [tool.mypy]
 ignore_missing_imports = true
+
+[tool.ruff.lint]
+ignore = ["UP031", "PYI019"]
+extend-select = ["F403"]

@@ -118,7 +118,7 @@ def test_build_groups_single_valid_group() -> None:
 
     assert len(groups) == 1
     assert groups[0].id == 0
-    assert groups[0].get_num_sources() == 3
+    assert len(groups[0]) == 3
     assert sorted(groups[0].get_source_ids()) == [10, 11, 12]
 
 
@@ -140,7 +140,7 @@ def test_build_groups_splits_when_sources_do_not_intersect() -> None:
 
     assert len(groups) == 2
     assert [g.id for g in groups] == [0, 1]
-    assert sorted(g.get_num_sources() for g in groups) == [1, 1]
+    assert sorted(len(g) for g in groups) == [1, 1]
 
 
 def test_build_groups_splits_when_memory_limit_exceeded() -> None:
@@ -159,7 +159,7 @@ def test_build_groups_splits_when_memory_limit_exceeded() -> None:
 
     assert len(groups) == 2
     assert [g.id for g in groups] == [0, 1]
-    assert all(g.get_num_sources() == 1 for g in groups)
+    assert all(len(g) == 1 for g in groups)
 
 
 def test_build_groups_parallel_matches_reference_multiple_sources() -> None:
@@ -215,7 +215,7 @@ def test_build_groups_parallel_matches_reference_multiple_sources() -> None:
     for i, (g_ref, g_new) in enumerate(zip(groups_ref, groups_new)):
         assert g_ref.id == i
         assert g_new.id == i
-        assert g_ref.get_num_sources() == g_new.get_num_sources()
+        assert len(g_ref) == len(g_new)
         assert g_ref.get_source_ids() == g_new.get_source_ids()
         assert np.allclose(g_ref.center, g_new.center, atol=1e-10, rtol=0.0)
         assert g_ref.radius == pytest.approx(g_new.radius, abs=1e-10)

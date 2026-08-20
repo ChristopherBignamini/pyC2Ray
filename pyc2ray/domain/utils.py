@@ -1,29 +1,16 @@
 import logging
-from typing import Sequence, Tuple
+from collections.abc import Sequence
+from pathlib import Path
 
 import numpy as np
 
 from pyc2ray.domain.sources import SourceGroup
-
-
-# TODO: this is probably not needed, check what is the strategy already adopted in pyC2Ray
-def get_domain_logger(name: str) -> logging.Logger:
-    logger = logging.getLogger(name)
-    logger.setLevel(logging.INFO)
-
-    if logger.hasHandlers():
-        return logger
-
-    handler = logging.StreamHandler()
-    handler.setFormatter(logging.Formatter("%(levelname)s:%(name)s:%(message)s"))
-    logger.addHandler(handler)
-    logger.propagate = False
-    return logger
+from pyc2ray.utils.logutils import configure_logger
 
 
 def find_enclosing_sphere(
     centers: np.ndarray, radii: np.ndarray, max_iter: int = 200, tol: float = 1e-8
-) -> Tuple[np.ndarray, float]:
+) -> tuple[np.ndarray, float]:
     """Approximate the minimum enclosing sphere of spheres.
 
     The objective is:
@@ -161,11 +148,9 @@ def evaluate_sphere_intersection(
     True if the two spheres intersect, False otherwise.
     """
     d = np.linalg.norm(center_a - center_b)
-    if d < radius_a + radius_b:
-        return True
-
-    return False
-
+    # TODO: Geometrically, tangency is typically considered intersection/touching.
+    # In the grouping logic this can spuriously split groups for boundary cases.
+    return bool(d < radius_a + radius_b)
 
 def evaluate_sphere_intersection_new(
     center_a: np.ndarray, radius_a: float, center_b: np.ndarray, radius_b: float
@@ -177,27 +162,30 @@ def evaluate_sphere_intersection_new(
     radius_sum = radius_a + radius_b
     return dx * dx + dy * dy + dz * dz < radius_sum * radius_sum
 
-
-logger = get_domain_logger(__name__)
-
+logger = logging.getLogger(__name__)
 
 def log_domain_decomposition_assignments(
     ranks_groups: Sequence[Sequence[SourceGroup]] | None,
     ranks_costs: Sequence[float],
+    log_file: Path | None = None,
     dr: float = 0.0,
 ) -> None:
+    if log_file is not None:
+        configure_logger(log_file)
+
     if ranks_groups is None:
         logger.info("No groups assigned to ranks.")
         return
     for rank, groups in enumerate(ranks_groups):
-        n_local_sources = sum(group.get_num_sources() for group in groups)
+        n_local_sources = sum(len(group) for group in groups)
         rank_cost = float(ranks_costs[rank])
 
         logger.info(
-            "Scatter check | rank=%d groups=%d total num sources=%d",
+            "Scatter check | rank=%d groups=%d total num sources=%d total rank cost=%.3e",
             rank,
             len(groups),
             n_local_sources,
+            rank_cost,
         )
 
         for group in groups:
@@ -205,7 +193,7 @@ def log_domain_decomposition_assignments(
             if dr > 0.0:
                 logger.info(
                     (
-                        "Local group index=%d cost=%.3e num sources=%d "
+                        "Local group index=%d num sources=%d "
                         "computational_cost=%.3e "
                         "memory_cost=%.3e MB "
                         "center=(%.2f, %.2f, %.2f) "
@@ -215,8 +203,7 @@ def log_domain_decomposition_assignments(
                         "bounding_box_max=(%.2f, %.2f, %.2f)"
                     ),
                     group.id,
-                    rank_cost,
-                    group.get_num_sources(),
+                    len(group),
                     group.comp_cost,
                     group.mem_cost / 1e6,
                     group.center[0],
@@ -237,7 +224,7 @@ def log_domain_decomposition_assignments(
             else:
                 logger.info(
                     (
-                        "Local group index=%d cost=%.3e num sources=%d "
+                        "Local group index=%d num sources=%d "
                         "computational_cost=%.3e "
                         "memory_cost=%.3e MB "
                         "center=(%.2f, %.2f, %.2f) "
@@ -245,8 +232,7 @@ def log_domain_decomposition_assignments(
                         "bounding_box_max=(%.2f, %.2f, %.2f)"
                     ),
                     group.id,
-                    rank_cost,
-                    group.get_num_sources(),
+                    len(group),
                     group.comp_cost,
                     group.mem_cost / 1e6,
                     group.center[0],
