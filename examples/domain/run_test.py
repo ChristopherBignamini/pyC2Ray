@@ -9,13 +9,20 @@ from typing import cast
 
 import numpy as np
 from mpi4py import MPI
+
 from pyc2ray.domain.cost_model import pyC2RayCostModel
+from pyc2ray.domain.domain_decomposition_handler import DomainDecompositionHandler
 from pyc2ray.domain.morton_grouping import MortonGroupingParams
 from pyc2ray.domain.regular_grid import RegularGrid
 from pyc2ray.domain.sources import Source
-from pyc2ray.domain.subdomain import Subdomain
 from pyc2ray.utils import bin_sources
-from pyc2ray.visualization.domain_decomposition import export_domain_decomposition_npz
+
+try:
+	from pyc2ray.visualization.domain_decomposition import (
+		export_domain_decomposition_npz,
+	)
+except ImportError:  # not shipped by every install (e.g. a plain main build)
+	export_domain_decomposition_npz = None  # type: ignore[assignment]
 
 alps_memory_per_GPU = 96e9 # 96 GB
 ranks_per_GPU = 1
@@ -61,17 +68,19 @@ def find_source_files(sources_dir: Path, pattern: str, max_files: int | None) ->
 	return files
 
 
-def create_subdomain(comm: MPI.Comm) -> tuple[Subdomain, RegularGrid]:
-	"""Create a Subdomain object bound to a global periodic RegularGrid."""
-	subdomain = Subdomain(comm=comm)
+def create_decomposition_handler(
+	comm: MPI.Comm,
+) -> tuple[DomainDecompositionHandler, RegularGrid]:
+	"""Create a decomposition handler bound to a global periodic RegularGrid."""
+	handler = DomainDecompositionHandler(comm=comm)
 	cell_size = (DOMAIN_MAX - DOMAIN_MIN) / GLOBAL_GRID_CELLS_PER_SIDE
 	global_grid = RegularGrid(
 		cell_size=cell_size,
 		num_cells=GLOBAL_GRID_CELLS_PER_SIDE,
 		is_periodic_mode_active=True,
 	)
-	subdomain.global_grid = global_grid
-	return subdomain, global_grid
+	handler.global_grid = global_grid
+	return handler, global_grid
 
 
 def wrap_periodic(coords: np.ndarray, domain_min: float, domain_max: float) -> np.ndarray:
@@ -459,10 +468,10 @@ def main() -> None:
 		print(f"- throughput: {total_rows / total_time:.1f} rows/s")
 
 	comm: MPI.Comm = MPI.COMM_WORLD
-	subdomain, global_grid = create_subdomain(comm)
+	handler, global_grid = create_decomposition_handler(comm)
 	print("\nSubdomain setup")
-	print(f"- rank: {subdomain.rank}")
-	print(f"- communicator size: {subdomain.comm.Get_size()}")
+	print(f"- rank: {handler.rank}")
+	print(f"- communicator size: {handler.comm.Get_size()}")
 	print(f"- global grid cells per side: {global_grid.num_cells}")
 	print(f"- global grid cell size: {global_grid.cell_size:.8f}")
 	print(f"- source radius (physical units): {SOURCE_RADIUS_PHYSICAL:.8f}")
@@ -491,7 +500,7 @@ def main() -> None:
 		)
 
 		t0_decomp = time.perf_counter()
-		subdomain.run_decomposition(
+		handler._run_decomposition(
 			global_grid=global_grid,
 			sources=sources,
 			cost_model=cost_model,
@@ -502,19 +511,24 @@ def main() -> None:
 
 		print("\nDecomposition summary")
 		print(f"- decomposition time: {dt_decomp:.3f}s")
-		print(f"- source groups assigned to rank: {subdomain.get_num_source_groups()}")
-		print(f"- rank decomposition cost: {subdomain.cost:.3e}")
+		print(f"- source groups assigned to rank: {handler.get_num_subdomains()}")
+		print(f"- rank decomposition cost: {handler.cost:.3e}")
 
-		npz_path = CACHE_DIR / f"domain_decomposition_rank{subdomain.rank}.npz"
-		local_regular_grids = [cast(RegularGrid, g) for g in subdomain.get_local_grids()]
-		exported_npz = export_domain_decomposition_npz(
-			global_grid=global_grid,
-			source_groups=subdomain.get_source_groups(),
-			local_grids=local_regular_grids,
-			output_path=npz_path,
-		)
-
-		print(f"- decomposition NPZ export: {exported_npz}")
+		npz_path = CACHE_DIR / f"domain_decomposition_rank{handler.rank}.npz"
+		subdomains = handler.get_subdomains()
+		local_regular_grids = [
+			cast(RegularGrid, sd.local_grid) for sd in subdomains
+		]
+		if export_domain_decomposition_npz is None:
+			print("- decomposition NPZ export: skipped (module not installed)")
+		else:
+			exported_npz = export_domain_decomposition_npz(
+				global_grid=global_grid,
+				source_groups=[sd.source_group for sd in subdomains],
+				local_grids=local_regular_grids,
+				output_path=npz_path,
+			)
+			print(f"- decomposition NPZ export: {exported_npz}")
 	else:
 		print("\nDecomposition summary")
 		print("- no sources available, decomposition skipped")
